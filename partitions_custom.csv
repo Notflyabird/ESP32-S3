@@ -1,0 +1,24 @@
+# ESP32-S3 N16R8 Custom Partition Table
+# 16MB Flash = 0x1000000 bytes
+# name,    type, subtype,  offset,     size,       flags
+
+# Bootloader (reserved, 0x0-0x8000)
+# Partition table (reserved, 0x8000-0x10000)
+
+# NVS
+nvs,       data, nvs,       0x10000,    0x8000,
+
+# PHY init data
+phy_init,  data, phy,       0x18000,    0x1000,
+
+# Factory app (4MB for large SR firmware)
+factory,   app,  factory,   0x20000,    0x400000,
+
+# OTA partition (4MB)
+ota_0,     app,  ota_0,     0x420000,   0x400000,
+
+# ESP-SR model storage (4MB SPIFFS)
+models,    data, spiffs,    0x820000,   0x400000,
+
+# User data / NVS storage (remainder, ~4MB)
+storage,   data, spiffs,    0xC20000,   0x3E0000,
