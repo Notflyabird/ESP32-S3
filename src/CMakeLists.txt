@@ -4,6 +4,7 @@ idf_component_register(
         "audio_input.c"
         "scorekeeper.c"
         "speech_recognition.c"
+        "lcd_st7789.c"
     INCLUDE_DIRS "."
-    PRIV_REQUIRES driver esp_driver_i2s
+    PRIV_REQUIRES driver esp_driver_i2s esp_driver_spi
 )
