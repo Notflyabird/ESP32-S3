@@ -1,5 +1,6 @@
 #include "lcd_st7789.h"
 
+#include <stdbool.h>
 #include <string.h>
 
 #include "driver/gpio.h"
@@ -8,6 +9,7 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "lcd_font.h"
 
 static const char *TAG = "LCD_ST7789";
 
@@ -18,28 +20,28 @@ static spi_device_handle_t s_spi_dev = NULL;
 static lcd_st7789_config_t s_cfg = {0};
 static bool s_initialized = false;
 
+/* ================================================================== */
+/*  Pre‑transaction callback: set DC pin according to `user` field     */
+/*  (0 = command, 1 = data).  This is the ESP‑IDF recommended way.    */
+/* ================================================================== */
+static void lcd_spi_pre_cb(spi_transaction_t *t)
+{
+    int dc_level = (int)(uintptr_t)t->user;
+    gpio_set_level(s_cfg.dc_io, dc_level);
+}
+
 /* ------------------------------------------------------------------ */
 /*  Low‑level helpers                                                  */
 /* ------------------------------------------------------------------ */
-static inline void lcd_dc_low(void)
-{
-    gpio_set_level(s_cfg.dc_io, 0);
-}
 
-static inline void lcd_dc_high(void)
-{
-    gpio_set_level(s_cfg.dc_io, 1);
-}
-
-/** Send a single byte as command (DC low → CS auto → transfer → CS auto). */
+/** Send a single byte as command. */
 static void lcd_write_cmd(uint8_t cmd)
 {
     spi_transaction_t t = {
         .length = 8,
         .tx_buffer = &cmd,
-        .user = (void *)0,  // DC-low marker not needed; we drive DC manually
+        .user = (void *)0,   /* DC low = command */
     };
-    lcd_dc_low();
     ESP_ERROR_CHECK(spi_device_polling_transmit(s_spi_dev, &t));
 }
 
@@ -49,9 +51,8 @@ static void lcd_write_data(uint8_t data)
     spi_transaction_t t = {
         .length = 8,
         .tx_buffer = &data,
-        .user = (void *)1,
+        .user = (void *)1,   /* DC high = data */
     };
-    lcd_dc_high();
     ESP_ERROR_CHECK(spi_device_polling_transmit(s_spi_dev, &t));
 }
 
@@ -62,9 +63,8 @@ static void lcd_write_data_buf(const uint8_t *buf, size_t len)
     spi_transaction_t t = {
         .length = len * 8,
         .tx_buffer = buf,
-        .user = (void *)1,
+        .user = (void *)1,   /* DC high = data */
     };
-    lcd_dc_high();
     ESP_ERROR_CHECK(spi_device_polling_transmit(s_spi_dev, &t));
 }
 
@@ -107,11 +107,11 @@ static void lcd_hw_reset(void)
     gpio_config(&io_conf);
 
     gpio_set_level(s_cfg.rst_io, 1);
-    vTaskDelay(pdMS_TO_TICKS(20));
+    vTaskDelay(pdMS_TO_TICKS(10));
     gpio_set_level(s_cfg.rst_io, 0);
-    vTaskDelay(pdMS_TO_TICKS(50));
+    vTaskDelay(pdMS_TO_TICKS(10));
     gpio_set_level(s_cfg.rst_io, 1);
-    vTaskDelay(pdMS_TO_TICKS(120));
+    vTaskDelay(pdMS_TO_TICKS(150));   /* wait for display to stabilise */
 }
 
 /* ------------------------------------------------------------------ */
@@ -121,23 +121,89 @@ static void lcd_display_init(void)
 {
     lcd_hw_reset();
 
-    lcd_write_cmd(0x01);   // SWRESET
-    vTaskDelay(pdMS_TO_TICKS(150));
-    lcd_write_cmd(0x11);   // SLPOUT
+    lcd_write_cmd(0x01);   /* SWRESET */
     vTaskDelay(pdMS_TO_TICKS(150));
 
-    lcd_write_cmd(0x3A);   // COLMOD – 16-bit / RGB565
-    lcd_write_data(0x55);
+    lcd_write_cmd(0x11);   /* SLPOUT – exit sleep */
+    vTaskDelay(pdMS_TO_TICKS(120));
 
-    lcd_write_cmd(0x36);   // MADCTL
+    lcd_write_cmd(0x3A);   /* COLMOD – pixel format */
+    lcd_write_data(0x55);  /* 16‑bit / RGB565 */
+
+    lcd_write_cmd(0xB2);   /* PORCTRL – porch control */
+    lcd_write_data(0x0C);
+    lcd_write_data(0x0C);
+    lcd_write_data(0x00);
+    lcd_write_data(0x33);
+    lcd_write_data(0x33);
+
+    lcd_write_cmd(0xB7);   /* GCTRL – gate control */
+    lcd_write_data(0x35);
+
+    lcd_write_cmd(0xBB);   /* VCOMS – VCOM setting */
+    lcd_write_data(0x19);
+
+    lcd_write_cmd(0xC0);   /* LCMCTRL – LCM control */
+    lcd_write_data(0x2C);
+
+    lcd_write_cmd(0xC2);   /* VDVVRHEN – VDV and VRH enable */
+    lcd_write_data(0x01);
+
+    lcd_write_cmd(0xC3);   /* VRHS – VRH set */
+    lcd_write_data(0x12);
+
+    lcd_write_cmd(0xC4);   /* VDVS – VDV set */
+    lcd_write_data(0x20);
+
+    lcd_write_cmd(0xC6);   /* FRCTRL2 – frame rate control */
+    lcd_write_data(0x0F);
+
+    lcd_write_cmd(0xD0);   /* PWCTRL1 – power control 1 */
+    lcd_write_data(0xA4);
+    lcd_write_data(0xA1);
+
+    lcd_write_cmd(0xE0);   /* PVGAMCTRL – positive gamma */
+    lcd_write_data(0xD0);
+    lcd_write_data(0x04);
+    lcd_write_data(0x0D);
+    lcd_write_data(0x11);
+    lcd_write_data(0x13);
+    lcd_write_data(0x2B);
+    lcd_write_data(0x3F);
+    lcd_write_data(0x54);
+    lcd_write_data(0x4C);
+    lcd_write_data(0x18);
+    lcd_write_data(0x0D);
+    lcd_write_data(0x0B);
+    lcd_write_data(0x1F);
+    lcd_write_data(0x23);
+
+    lcd_write_cmd(0xE1);   /* NVGAMCTRL – negative gamma */
+    lcd_write_data(0xD0);
+    lcd_write_data(0x04);
+    lcd_write_data(0x0C);
+    lcd_write_data(0x11);
+    lcd_write_data(0x13);
+    lcd_write_data(0x2C);
+    lcd_write_data(0x3F);
+    lcd_write_data(0x44);
+    lcd_write_data(0x51);
+    lcd_write_data(0x2F);
+    lcd_write_data(0x1F);
+    lcd_write_data(0x1F);
+    lcd_write_data(0x20);
+    lcd_write_data(0x23);
+
+    lcd_write_cmd(0x36);   /* MADCTL – memory data access control */
     lcd_write_data(0x00);
 
-    lcd_write_cmd(0x21);   // INVON
+    lcd_write_cmd(0x21);   /* INVON – display inversion on */
     vTaskDelay(pdMS_TO_TICKS(10));
 
-    lcd_write_cmd(0x13);   // NORON
+    lcd_write_cmd(0x13);   /* NORON – normal display mode */
     vTaskDelay(pdMS_TO_TICKS(10));
-    lcd_write_cmd(0x29);   // DISPON
+
+    lcd_write_cmd(0x29);   /* DISPON – display on */
     vTaskDelay(pdMS_TO_TICKS(100));
 }
 
@@ -153,16 +219,15 @@ esp_err_t lcd_st7789_init(const lcd_st7789_config_t *cfg)
 
     s_cfg = *cfg;
 
-    /* --- GPIO: CS and DC --- */
+    /* --- GPIO: DC only (CS is managed by SPI driver) --- */
     gpio_config_t io_conf = {
-        .pin_bit_mask = (1ULL << s_cfg.cs_io) | (1ULL << s_cfg.dc_io),
+        .pin_bit_mask = (1ULL << s_cfg.dc_io),
         .mode = GPIO_MODE_OUTPUT,
         .pull_up_en = GPIO_PULLUP_DISABLE,
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
         .intr_type = GPIO_INTR_DISABLE,
     };
     gpio_config(&io_conf);
-    gpio_set_level(s_cfg.cs_io, 1);   // CS inactive
     gpio_set_level(s_cfg.dc_io, 1);   // default high
 
     /* --- Backlight --- */
@@ -194,11 +259,12 @@ esp_err_t lcd_st7789_init(const lcd_st7789_config_t *cfg)
 
     /* --- Add ST7789 device --- */
     spi_device_interface_config_t dev_cfg = {
-        .mode = 0,                         // SPI mode 0
+        .mode = 0,                         /* SPI mode 0 */
         .clock_speed_hz = s_cfg.spi_freq_hz,
-        .spics_io_num = s_cfg.cs_io,
+        .spics_io_num = s_cfg.cs_io,       /* driver controls CS */
         .queue_size = 7,
         .flags = SPI_DEVICE_NO_DUMMY,
+        .pre_cb = lcd_spi_pre_cb,          /* DC pin per‑transaction */
     };
 
     ESP_RETURN_ON_ERROR(
@@ -207,6 +273,13 @@ esp_err_t lcd_st7789_init(const lcd_st7789_config_t *cfg)
 
     /* --- LCD init sequence --- */
     lcd_display_init();
+
+    /* --- Quick diagnostic: fill red → black so user sees SPI works --- */
+    ESP_LOGI(TAG, "Diagnostic: filling screen red...");
+    lcd_st7789_fill_rect(0, 0, s_cfg.width, s_cfg.height, 0xF800);
+    vTaskDelay(pdMS_TO_TICKS(300));
+    ESP_LOGI(TAG, "Diagnostic: filling screen black...");
+    lcd_st7789_fill_rect(0, 0, s_cfg.width, s_cfg.height, 0x0000);
 
     s_initialized = true;
     ESP_LOGI(TAG, "ST7789 initialized: %dx%d @ %lu Hz, pins MOSI=%d SCLK=%d CS=%d DC=%d RST=%d BL=%d",
@@ -247,16 +320,99 @@ void lcd_st7789_fill_rect(uint16_t x, uint16_t y, uint16_t w, uint16_t h,
     }
 
     uint32_t remaining = total;
-    lcd_dc_high();
     while (remaining > 0) {
         uint32_t n = (remaining < LCD_CHUNK_PIXELS) ? remaining : LCD_CHUNK_PIXELS;
         spi_transaction_t t = {
             .length = n * 2 * 8,
             .tx_buffer = chunk,
+            .user = (void *)1,    /* ← DC high: pixel data */
         };
         ESP_ERROR_CHECK(spi_device_polling_transmit(s_spi_dev, &t));
         remaining -= n;
     }
+}
+
+/* ------------------------------------------------------------------ */
+/*  Pixel drawing                                                      */
+/* ------------------------------------------------------------------ */
+void lcd_st7789_draw_pixel(uint16_t x, uint16_t y, uint16_t color)
+{
+    if (!s_initialized) return;
+    lcd_set_window(x, y, x, y);
+    uint8_t buf[2] = { color >> 8, color & 0xFF };
+    /* lcd_write_data_buf sets DC via .user=1, no manual DC needed */
+    lcd_write_data_buf(buf, 2);
+}
+
+/* ------------------------------------------------------------------ */
+/*  Text rendering                                                     */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Draw one glyph at (x, y).  The caller has already set DC appropriately;
+ * we set the window and send pixel rows.
+ *
+ * Each row of the glyph is drawn as one or two contiguous pixel segments
+ * (left half + right half for 16‑px‑wide glyphs).  We build a temporary
+ * line buffer and transmit it.
+ */
+static void draw_glyph(uint16_t x, uint16_t y,
+                       const uint8_t *bitmap, uint8_t w,
+                       uint16_t fg, uint16_t bg)
+{
+    if (!bitmap || w == 0) return;
+
+    uint8_t line_buf[16];  /* 8 px × 2 bytes = 16 bytes */
+
+    for (uint8_t row = 0; row < LCD_FONT_H; row++) {
+        uint8_t byte_val = bitmap[row];
+        uint8_t *dst = line_buf;
+
+        for (uint8_t col = 0; col < w; col++) {
+            bool on = (byte_val >> (7 - col)) & 1;
+            uint16_t c = on ? fg : bg;
+            *dst++ = c >> 8;
+            *dst++ = c & 0xFF;
+        }
+
+        if (w > 0) {
+            lcd_set_window(x, y + row, x + w - 1, y + row);
+            spi_transaction_t t = {
+                .length = w * 2 * 8,
+                .tx_buffer = line_buf,
+                .user = (void *)1,    /* DC high */
+            };
+            ESP_ERROR_CHECK(spi_device_polling_transmit(s_spi_dev, &t));
+        }
+    }
+}
+
+void lcd_st7789_draw_string(uint16_t x, uint16_t y, const char *str,
+                            uint16_t fg_color, uint16_t bg_color)
+{
+    if (!s_initialized || !str) return;
+
+    uint16_t cur_x = x;
+    for (const char *p = str; *p; p++) {
+        uint8_t gw = 0;
+        const uint8_t *glyph = lcd_font_get_glyph(*p, &gw);
+        if (glyph && gw > 0) {
+            draw_glyph(cur_x, y, glyph, gw, fg_color, bg_color);
+            cur_x += gw;
+        }
+    }
+}
+
+uint16_t lcd_st7789_string_width(const char *str)
+{
+    if (!str) return 0;
+    uint16_t w = 0;
+    for (const char *p = str; *p; p++) {
+        uint8_t gw = 0;
+        lcd_font_get_glyph(*p, &gw);
+        w += gw;
+    }
+    return w;
 }
 
 void lcd_st7789_deinit(void)
