@@ -1,7 +1,7 @@
 #pragma once
 
 #include "driver/gpio.h"
-#include "driver/i2s.h"
+#include "driver/i2s_std.h"
 
 /* ====================== I2S / Microphone ====================== */
 #define APP_I2S_PORT I2S_NUM_0
@@ -25,4 +25,11 @@
 #define LCD_WIDTH         240
 #define LCD_HEIGHT        320
 #define LCD_SPI_FREQ_HZ   (40 * 1000 * 1000)  /* 40 MHz */
+
+/* ====================== MAX98357A I2S1 Speaker ================ */
+#define SPEAKER_I2S_PORT      I2S_NUM_1
+#define SPEAKER_PIN_BCLK      GPIO_NUM_15
+#define SPEAKER_PIN_LRCLK     GPIO_NUM_16
+#define SPEAKER_PIN_DOUT      GPIO_NUM_17
+#define SPEAKER_PIN_SD        GPIO_NUM_18   /* SD 静音引脚 */
 

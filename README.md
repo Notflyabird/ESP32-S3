@@ -4,12 +4,26 @@ Pure ESP-IDF 5.3.5 project for an ESP32-S3 N16R8 board with a single INMP441 mic
 
 ## Hardware
 
-- INMP441 BCLK: GPIO4
-- INMP441 WS: GPIO5
-- INMP441 SD: GPIO6
-- INMP441 L/R: GND
+### 引脚总览
 
-No speaker, TTS, NVS storage, display, or LED output is used. All score state is printed through serial logs.
+| 外设 | 信号 | GPIO | 说明 |
+|------|------|------|------|
+| INMP441 (I2S0) | BCLK | GPIO4 | I2S 位时钟 |
+| INMP441 (I2S0) | WS | GPIO5 | I2S 左右通道时钟 |
+| INMP441 (I2S0) | SD | GPIO6 | I2S 数据输入 |
+| ST7789 LCD (SPI2) | BL | GPIO7 | 背光控制 |
+| ST7789 LCD (SPI2) | RST | GPIO8 | 硬件复位 |
+| ST7789 LCD (SPI2) | DC | GPIO9 | 数据/命令选择 |
+| ST7789 LCD (SPI2) | CS | GPIO10 | SPI 片选 |
+| ST7789 LCD (SPI2) | MOSI | GPIO11 | SPI 主机输出 |
+| ST7789 LCD (SPI2) | SCLK | GPIO12 | SPI 时钟 |
+| MAX98357A (I2S1) | BCLK | GPIO15 | I2S 位时钟 |
+| MAX98357A (I2S1) | LRCLK | GPIO16 | I2S 左右通道时钟 |
+| MAX98357A (I2S1) | DOUT | GPIO17 | I2S 数据输出 |
+| MAX98357A | SD | GPIO18 | 静音控制 (HIGH=播放/LOW=静音) |
+
+> 共占用 13 个 GPIO（GPIO4 ~ GPIO18），INMP441 的 L/R 引脚接地。
+> 已配置外设：INMP441 麦克风 (I2S0)、ST7789 LCD (SPI2, 240×320)、MAX98357A 功放 (I2S1)。
 
 ## Voice Commands
 

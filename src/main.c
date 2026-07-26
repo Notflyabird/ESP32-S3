@@ -1,5 +1,6 @@
 #include "app_config.h"
 #include "audio_input.h"
+#include "audio_player.h"
 #include "esp_log.h"
 #include "lcd_st7789.h"
 #include "lcd_ui.h"
@@ -30,7 +31,12 @@ void app_main(void)
     /* Demo: show initial scores with player 1 as landlord */
     lcd_ui_update(1, 0, 0, 0, "Waiting...");
 
-    /* ---------- Audio / SR init ---------- */
+    /* ---------- Speaker self-test (I2S1, MAX98357A) ---------- */
+    audio_player_init();
+    audio_player_self_test();
+    audio_play_hello();
+
+    /* ---------- Audio / SR init (I2S0, INMP441) ---------- */
     audio_input_init();
 
     if (!speech_recognition_init()) {
@@ -39,6 +45,8 @@ void app_main(void)
 
     ESP_LOGI(TAG, "ESP32-S3 ESP-SR Dou Dizhu scorekeeper started");
     ESP_LOGI(TAG, "Single mic INMP441: BCLK=%d WS=%d SD=%d", APP_PIN_BCLK, APP_PIN_WS, APP_PIN_SD);
+    ESP_LOGI(TAG, "Speaker MAX98357A: I2S1 BCLK=%d LRCLK=%d DOUT=%d SD=%d",
+             SPEAKER_PIN_BCLK, SPEAKER_PIN_LRCLK, SPEAKER_PIN_DOUT, SPEAKER_PIN_SD);
     scorekeeper_print_scores("Initial");
     speech_recognition_print_pipeline();
 

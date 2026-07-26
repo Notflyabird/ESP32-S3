@@ -4,36 +4,44 @@
 #include <stdlib.h>
 
 #include "app_config.h"
-#include "driver/i2s.h"
+#include "driver/i2s_std.h"
 #include "esp_heap_caps.h"
+#include "freertos/FreeRTOS.h"
+
+/* I2S0 RX channel handle */
+static i2s_chan_handle_t s_rx_chan = NULL;
 
 void audio_input_init(void)
 {
-    i2s_config_t config = {
-        .mode = I2S_MODE_MASTER | I2S_MODE_RX,
-        .sample_rate = APP_SAMPLE_RATE,
-        .bits_per_sample = I2S_BITS_PER_SAMPLE_32BIT,
-        .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT,
-        .communication_format = I2S_COMM_FORMAT_STAND_I2S,
-        .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
-        .dma_buf_count = 6,
-        .dma_buf_len = 256,
-        .use_apll = false,
-        .tx_desc_auto_clear = false,
-        .fixed_mclk = 0,
-    };
+    /* 创建 I2S0 接收通道 */
+    i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(APP_I2S_PORT, I2S_ROLE_MASTER);
+    chan_cfg.auto_clear = true;
+    ESP_ERROR_CHECK(i2s_new_channel(&chan_cfg, NULL, &s_rx_chan));
 
-    i2s_pin_config_t pins = {
-        .mck_io_num = I2S_PIN_NO_CHANGE,
-        .bck_io_num = APP_PIN_BCLK,
-        .ws_io_num = APP_PIN_WS,
-        .data_out_num = I2S_PIN_NO_CHANGE,
-        .data_in_num = APP_PIN_SD,
+    /* 配置标准 I2S 接收模式 */
+    i2s_std_config_t std_cfg = {
+        .clk_cfg = {
+            .sample_rate_hz = APP_SAMPLE_RATE,
+            .clk_src = I2S_CLK_SRC_DEFAULT,
+            .mclk_multiple = I2S_MCLK_MULTIPLE_256,
+        },
+        .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(
+                I2S_DATA_BIT_WIDTH_32BIT, I2S_SLOT_MODE_MONO),
+        .gpio_cfg = {
+            .mclk = I2S_GPIO_UNUSED,
+            .bclk = APP_PIN_BCLK,
+            .ws   = APP_PIN_WS,
+            .dout = I2S_GPIO_UNUSED,
+            .din  = APP_PIN_SD,
+            .invert_flags = {
+                .mclk_inv = false,
+                .bclk_inv = false,
+                .ws_inv   = false,
+            },
+        },
     };
-
-    ESP_ERROR_CHECK(i2s_driver_install(APP_I2S_PORT, &config, 0, NULL));
-    ESP_ERROR_CHECK(i2s_set_pin(APP_I2S_PORT, &pins));
-    ESP_ERROR_CHECK(i2s_zero_dma_buffer(APP_I2S_PORT));
+    ESP_ERROR_CHECK(i2s_channel_init_std_mode(s_rx_chan, &std_cfg));
+    ESP_ERROR_CHECK(i2s_channel_enable(s_rx_chan));
 }
 
 void *audio_input_alloc(size_t size)
@@ -61,8 +69,10 @@ esp_err_t audio_input_read_pcm_chunk(int32_t *raw, int16_t *pcm, int sample_coun
 
     while (total < wanted) {
         size_t bytes_read = 0;
-        esp_err_t err = i2s_read(APP_I2S_PORT, (uint8_t *)raw + total,
-                                 wanted - total, &bytes_read, portMAX_DELAY);
+        esp_err_t err = i2s_channel_read(s_rx_chan,
+                                         (uint8_t *)raw + total,
+                                         wanted - total,
+                                         &bytes_read, portMAX_DELAY);
         if (err != ESP_OK) {
             return err;
         }
