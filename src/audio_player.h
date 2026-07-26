@@ -44,6 +44,16 @@ void audio_set_mute(bool mute_en);
 bool audio_play_wav(const uint8_t *wav_buf, size_t buf_len);
 
 /**
+ * @brief 直接播放 PCM 数据（16 bit 单声道，16000 Hz）。
+ *
+ * 直接写入 I2S DMA，无需 WAV 头，适用于 TTS 流式输出。
+ *
+ * @param pcm_data     PCM 数据指针。
+ * @param sample_count 采样点数。
+ */
+void audio_play_pcm(const int16_t *pcm_data, size_t sample_count);
+
+/**
  * @brief 阻塞等待当前播放完成。
  *
  * 若当前无播放任务，立即返回。

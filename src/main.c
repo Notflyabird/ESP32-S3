@@ -2,10 +2,13 @@
 #include "audio_input.h"
 #include "audio_player.h"
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "lcd_st7789.h"
 #include "lcd_ui.h"
 #include "scorekeeper.h"
 #include "speech_recognition.h"
+#include "tts_player.h"
 
 static const char *TAG = "DDZ_APP";
 
@@ -25,16 +28,24 @@ void app_main(void)
     };
     ESP_ERROR_CHECK(lcd_st7789_init(&lcd_cfg));
 
-    /* Draw the static scorekeeper frame once */
     lcd_ui_init_page();
+    lcd_ui_update(1, 0, 0, 0, "Initializing...");
 
-    /* Demo: show initial scores with player 1 as landlord */
-    lcd_ui_update(1, 0, 0, 0, "Waiting...");
-
-    /* ---------- Speaker self-test (I2S1, MAX98357A) ---------- */
+    /* ---------- Speaker init (I2S1, MAX98357A) ---------- */
     audio_player_init();
     audio_player_self_test();
-    audio_play_hello();
+    // audio_play_hello();
+
+    /* ---------- TTS init ---------- */
+    if (!tts_player_init()) {
+        ESP_LOGE(TAG, "TTS init failed");
+        return;
+    }
+    tts_play_text("语音斗地主计分系统已启动");
+    
+    while (tts_is_playing()) {
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
 
     /* ---------- Audio / SR init (I2S0, INMP441) ---------- */
     audio_input_init();
@@ -50,8 +61,9 @@ void app_main(void)
     scorekeeper_print_scores("Initial");
     speech_recognition_print_pipeline();
 
+    lcd_ui_update(0, 0, 0, 0, "Ready - Say Hi ESP");
+
     if (!speech_recognition_start()) {
         ESP_LOGE(TAG, "Failed to create speech tasks");
     }
 }
-

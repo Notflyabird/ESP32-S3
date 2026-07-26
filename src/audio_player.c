@@ -197,6 +197,27 @@ bool audio_play_wav(const uint8_t *wav_buf, size_t buf_len)
 }
 
 /* ================================================================== */
+/*  PCM 直接播放                                                        */
+/* ================================================================== */
+void audio_play_pcm(const int16_t *pcm_data, size_t sample_count)
+{
+    if (!pcm_data || sample_count == 0) return;
+
+    size_t pcm_bytes = sample_count * sizeof(int16_t);
+    size_t bytes_written = 0;
+    esp_err_t ret = i2s_channel_write(s_tx_chan, pcm_data, pcm_bytes,
+                                       &bytes_written, portMAX_DELAY);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "I2S write failed: %s", esp_err_to_name(ret));
+        return;
+    }
+
+    s_pcm_bytes = pcm_bytes;
+    s_playing = true;
+    ESP_LOGD(TAG, "PCM playback started: %u samples", (unsigned int)sample_count);
+}
+
+/* ================================================================== */
 /*  等待播放完成                                                        */
 /* ================================================================== */
 void audio_wait_play_finish(void)

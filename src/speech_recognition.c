@@ -16,6 +16,8 @@
 #include "model_path.h"
 #include "scorekeeper.h"
 
+extern volatile bool g_sr_paused;
+
 static const char *TAG = "DDZ_SR";
 
 typedef struct {
@@ -137,6 +139,9 @@ static void feed_task(void *arg)
 
     ESP_LOGI(TAG, "AFE feed started: %d samples", chunk);
     while (true) {
+        while (g_sr_paused) {
+            vTaskDelay(pdMS_TO_TICKS(10));
+        }
         esp_err_t err = audio_input_read_pcm_chunk(raw, pcm, chunk);
         if (err == ESP_OK) {
             speech->afe_iface->feed(speech->afe_data, pcm);

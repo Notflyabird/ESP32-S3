@@ -1,10 +1,13 @@
 #include "scorekeeper.h"
 
 #include <stdio.h>
+#include <string.h>
 
 #include "esp_err.h"
 #include "esp_log.h"
 #include "esp_mn_speech_commands.h"
+#include "lcd_ui.h"
+#include "tts_player.h"
 
 static const char *TAG = "DDZ_SCORE";
 
@@ -18,6 +21,7 @@ typedef struct {
 } point_phrase_t;
 
 static int s_score[3] = {0, 0, 0};
+static int s_landlord = 0;
 
 static const char *const PLAYER_PHRASES[3] = {
     "yi hao",
@@ -49,11 +53,22 @@ void scorekeeper_print_scores(const char *title)
              title, s_score[0], s_score[1], s_score[2], score_total());
 }
 
+void scorekeeper_get_scores(int *s1, int *s2, int *s3, int *landlord)
+{
+    *s1 = s_score[0];
+    *s2 = s_score[1];
+    *s3 = s_score[2];
+    if (landlord) {
+        *landlord = s_landlord;
+    }
+}
+
 static void reset_scores(void)
 {
     s_score[0] = 0;
     s_score[1] = 0;
     s_score[2] = 0;
+    s_landlord = 0;
     ESP_LOGI(TAG, "All scores reset");
     scorekeeper_print_scores("After reset");
 }
@@ -91,6 +106,8 @@ static void settle_round(int landlord, bool landlord_win, int points)
     const int farmer_delta = landlord_win ? -(points / 2) : (points / 2);
     const int landlord_index = landlord - 1;
 
+    s_landlord = landlord;
+
     ESP_LOGI(TAG, "Command: P%d landlord %s %d points",
              landlord, landlord_win ? "wins" : "loses", points);
     ESP_LOGI(TAG, "Before: P1=%d, P2=%d, P3=%d, total=%d",
@@ -109,6 +126,29 @@ static void settle_round(int landlord, bool landlord_win, int points)
     }
 }
 
+static void speak_score_update(int player, bool landlord_win, int points)
+{
+    char text[128];
+    const char *player_name = (player == 1) ? "一号" : (player == 2) ? "二号" : "三号";
+    const char *result = landlord_win ? "赢" : "输";
+    
+    snprintf(text, sizeof(text), "%s地主%s%d分", player_name, result, points);
+    tts_play_text(text);
+}
+
+static void speak_query_score(void)
+{
+    char text[128];
+    snprintf(text, sizeof(text), "当前分数，一号%d分，二号%d分，三号%d分",
+             s_score[0], s_score[1], s_score[2]);
+    tts_play_text(text);
+}
+
+static void speak_reset(void)
+{
+    tts_play_text("分数已重置");
+}
+
 void scorekeeper_apply_command(int command)
 {
     int player = 0;
@@ -117,15 +157,21 @@ void scorekeeper_apply_command(int command)
 
     if (parse_score_command_id(command, &player, &landlord_win, &points)) {
         settle_round(player, landlord_win, points);
+        speak_score_update(player, landlord_win, points);
+        lcd_ui_update((uint8_t)player, s_score[0], s_score[1], s_score[2], "Score updated");
         return;
     }
 
     switch (command) {
     case CMD_QUERY_SCORE:
         scorekeeper_print_scores("Query");
+        speak_query_score();
+        lcd_ui_update((uint8_t)s_landlord, s_score[0], s_score[1], s_score[2], "Querying...");
         break;
     case CMD_RESET_SCORE:
         reset_scores();
+        speak_reset();
+        lcd_ui_update(0, s_score[0], s_score[1], s_score[2], "Reset complete");
         break;
     default:
         ESP_LOGW(TAG, "Unknown command id: %d", command);
@@ -174,4 +220,3 @@ bool scorekeeper_register_commands(void)
            add_command_checked(esp_mn_commands_add(CMD_RESET_SCORE, "chong zhi suo you fen shu"),
                                CMD_RESET_SCORE, "chong zhi suo you fen shu");
 }
-
