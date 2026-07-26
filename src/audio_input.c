@@ -22,7 +22,7 @@ void audio_input_init(void)
     i2s_std_config_t std_cfg = {
         .clk_cfg = {
             .sample_rate_hz = APP_SAMPLE_RATE,
-            .clk_src = I2S_CLK_SRC_DEFAULT,
+            .clk_src = I2S_CLK_SRC_PLL_160M,  /* 160 MHz PLL: better precision */
             .mclk_multiple = I2S_MCLK_MULTIPLE_256,
         },
         .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(

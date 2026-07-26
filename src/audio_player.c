@@ -79,7 +79,7 @@ void audio_player_init(void)
     i2s_std_config_t std_cfg = {
         .clk_cfg = {
             .sample_rate_hz = SAMPLE_RATE,
-            .clk_src = I2S_CLK_SRC_DEFAULT,
+            .clk_src = I2S_CLK_SRC_PLL_160M,  /* 160 MHz PLL: better precision than DEFAULT */
             .mclk_multiple = I2S_MCLK_MULTIPLE_256,
         },
         .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_BITS, I2S_SLOT_MODE_MONO),
