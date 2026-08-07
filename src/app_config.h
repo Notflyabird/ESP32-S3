@@ -10,7 +10,10 @@
 #define APP_PIN_SD   GPIO_NUM_6
 
 #define APP_SAMPLE_RATE       16000
-#define APP_MIC_SAMPLE_SHIFT  14
+/* INMP441: 24-bit signed in 32-bit slot, MSB-aligned.
+   Right shift 16 → 16-bit PCM with ~96dB dynamic range,
+   avoid clipping (32768) which breaks WakeNet recognition. */
+#define APP_MIC_SAMPLE_SHIFT  16
 #define APP_COMMAND_TIMEOUT_MS 6000
 
 /* ====================== LCD ST7789 ============================ */

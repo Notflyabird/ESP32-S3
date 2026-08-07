@@ -88,8 +88,6 @@ void tts_play_text(const char *text)
     if (xQueueSend(s_tts_queue, buf, pdMS_TO_TICKS(100)) != pdTRUE) {
         ESP_LOGW(TAG, "TTS queue full, skipping: %s", text);
         s_playing = false;
-    } else {
-        ESP_LOGI(TAG, "TTS queued: %s", text);
     }
 }
 
@@ -130,7 +128,7 @@ static void tts_task(void *arg)
         }
 
         s_playing = true;
-        ESP_LOGI(TAG, "TTS playing: %s", text);
+        ESP_LOGI(TAG, "Playing: %s", text);
 
         g_sr_paused = true;
         vTaskDelay(pdMS_TO_TICKS(50));
@@ -142,36 +140,28 @@ static void tts_task(void *arg)
             goto cleanup;
         }
 
+        /* 流式播放：i2s_channel_write 是阻塞的，写入时自动等待 DMA 有空位，
+           无需额外 vTaskDelay — 否则 PCM 流中断导致爆音。 */
         size_t total_samples = 0;
-        int chunk_idx = 0;
         while (true) {
             int len = 0;
-            ESP_LOGI(TAG, "TTS stream_play chunk %d", chunk_idx);
             short *pcm_buf = esp_tts_stream_play(s_tts, &len, 5);
-            ESP_LOGI(TAG, "TTS stream_play returned: len=%d", len);
             if (len == 0 || pcm_buf == NULL) {
                 break;
             }
-            ESP_LOGI(TAG, "TTS audio_play_pcm: len=%d", len);
             audio_play_pcm(pcm_buf, len);
             total_samples += len;
-            chunk_idx++;
-            vTaskDelay(pdMS_TO_TICKS(1));
         }
 
+        /* 等待 DMA buffer 排空：128ms buffer + 100ms 余量 */
         if (total_samples > 0) {
-            uint32_t duration_ms = (uint32_t)(total_samples * 1000 / 16000) + 50;
-            vTaskDelay(pdMS_TO_TICKS(duration_ms));
+            vTaskDelay(pdMS_TO_TICKS(250));
         }
 
 cleanup:
         audio_set_mute(true);
-
         g_sr_paused = false;
-        vTaskDelay(pdMS_TO_TICKS(20));
-
         s_playing = false;
-        ESP_LOGI(TAG, "TTS playback finished");
     }
 }
 

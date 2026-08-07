@@ -13,8 +13,10 @@
 #include "esp_mn_speech_commands.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "lcd_ui.h"
 #include "model_path.h"
 #include "scorekeeper.h"
+#include "tts_player.h"
 
 extern volatile bool g_sr_paused;
 
@@ -137,13 +139,27 @@ static void feed_task(void *arg)
         return;
     }
 
-    ESP_LOGI(TAG, "AFE feed started: %d samples", chunk);
+    ESP_LOGI(TAG, "AFE feed task started: chunk=%d samples", chunk);
+
+    uint32_t stats_counter = 0;
+    int32_t max_abs = 0;
+
     while (true) {
         while (g_sr_paused) {
             vTaskDelay(pdMS_TO_TICKS(10));
         }
         esp_err_t err = audio_input_read_pcm_chunk(raw, pcm, chunk);
         if (err == ESP_OK) {
+            /* 峰值统计：每 512 chunk（~16s）打印一次，仅 DEBUG 级别 */
+            for (int i = 0; i < chunk; ++i) {
+                int32_t v = pcm[i] < 0 ? -pcm[i] : pcm[i];
+                if (v > max_abs) max_abs = v;
+            }
+            stats_counter++;
+            if ((stats_counter & 0x1FF) == 0) {
+                ESP_LOGD(TAG, "AFE fed %u chunks, peak=%d", (unsigned)stats_counter, (int)max_abs);
+                max_abs = 0;
+            }
             speech->afe_iface->feed(speech->afe_data, pcm);
         } else {
             ESP_LOGW(TAG, "I2S read failed: %s", esp_err_to_name(err));
@@ -186,7 +202,7 @@ static void detect_task(void *arg)
 
     bool command_session = false;
     bool timed_out = false;
-    ESP_LOGI(TAG, "Say Hi ESP first, then say a Dou Dizhu scoring command");
+    ESP_LOGI(TAG, "SR detect task started, waiting for wake word (Hi ESP)");
 
     while (true) {
         afe_fetch_result_t *result = speech->afe_iface->fetch(speech->afe_data);
@@ -196,11 +212,15 @@ static void detect_task(void *arg)
         }
 
         if (result->wakeup_state == WAKENET_DETECTED) {
+            ESP_LOGI(TAG, "Wake word detected! Listening for command...");
+            int s1, s2, s3, landlord;
+            scorekeeper_get_scores(&s1, &s2, &s3, &landlord);
+            lcd_ui_update((uint8_t)landlord, s1, s2, s3, "我在听...");
+            tts_play_text("我在");
             speech->chinese.iface->clean(speech->chinese.data);
             speech->afe_iface->disable_wakenet(speech->afe_data);
             command_session = true;
             timed_out = false;
-            ESP_LOGI(TAG, "Wake word detected; listening for command");
         }
 
         if (!command_session) {
@@ -216,7 +236,9 @@ static void detect_task(void *arg)
         } else if (timed_out) {
             speech->afe_iface->enable_wakenet(speech->afe_data);
             command_session = false;
-            ESP_LOGI(TAG, "Command timeout; waiting for wake word");
+            int s1, s2, s3, landlord;
+            scorekeeper_get_scores(&s1, &s2, &s3, &landlord);
+            lcd_ui_update((uint8_t)landlord, s1, s2, s3, "Ready - Say Hi ESP");
         }
     }
 }

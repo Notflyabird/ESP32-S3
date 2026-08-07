@@ -1,11 +1,16 @@
 #include "scorekeeper.h"
 
+#include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 
 #include "esp_err.h"
 #include "esp_log.h"
 #include "esp_mn_speech_commands.h"
+#include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+#include "freertos/task.h"
 #include "lcd_ui.h"
 #include "tts_player.h"
 
@@ -15,6 +20,9 @@ static const char *TAG = "DDZ_SCORE";
 #define CMD_RESET_SCORE 2
 #define CMD_SCORE_BASE 100
 
+/* 撤销窗口：10 秒内有效 */
+#define UNDO_WINDOW_MS 10000
+
 typedef struct {
     const char *spoken;
     int points;
@@ -22,6 +30,20 @@ typedef struct {
 
 static int s_score[3] = {0, 0, 0};
 static int s_landlord = 0;
+
+/* 最近一次操作快照（用于撤销） */
+typedef struct {
+    bool       valid;            /* 是否存在可撤销操作 */
+    int        scores_before[3]; /* 操作前分数快照 */
+    int        landlord_before;  /* 操作前地主号 */
+    int        landlord_after;   /* 操作后地主号 */
+    bool       was_reset;        /* 是否是重置操作 */
+    int64_t    timestamp_ms;     /* 操作完成的时间戳 */
+    char       desc[64];         /* 操作描述（用于 TTS 反馈） */
+} undo_snapshot_t;
+
+static undo_snapshot_t s_last_op;
+static SemaphoreHandle_t s_score_lock;
 
 static const char *const PLAYER_PHRASES[3] = {
     "yi hao",
@@ -73,6 +95,43 @@ static void reset_scores(void)
     scorekeeper_print_scores("After reset");
 }
 
+static void undo_snapshot_begin(int64_t *save_scores, int *save_landlord)
+{
+    if (s_score_lock == NULL) {
+        s_score_lock = xSemaphoreCreateMutex();
+    }
+    xSemaphoreTake(s_score_lock, portMAX_DELAY);
+    save_scores[0] = s_score[0];
+    save_scores[1] = s_score[1];
+    save_scores[2] = s_score[2];
+    *save_landlord = s_landlord;
+}
+
+static void undo_snapshot_commit(const int64_t *scores_before, int landlord_before,
+                                 bool was_reset, const char *desc_fmt, ...)
+{
+    s_last_op.valid = true;
+    s_last_op.scores_before[0] = (int)scores_before[0];
+    s_last_op.scores_before[1] = (int)scores_before[1];
+    s_last_op.scores_before[2] = (int)scores_before[2];
+    s_last_op.landlord_before = landlord_before;
+    s_last_op.landlord_after  = s_landlord;
+    s_last_op.was_reset       = was_reset;
+    s_last_op.timestamp_ms    = esp_timer_get_time() / 1000;
+
+    va_list ap;
+    va_start(ap, desc_fmt);
+    vsnprintf(s_last_op.desc, sizeof(s_last_op.desc), desc_fmt, ap);
+    va_end(ap);
+
+    xSemaphoreGive(s_score_lock);
+}
+
+static void undo_snapshot_abort(void)
+{
+    xSemaphoreGive(s_score_lock);
+}
+
 static int make_score_command_id(int player, bool landlord_win, int points)
 {
     const int player_index = player - 1;
@@ -101,25 +160,19 @@ static bool parse_score_command_id(int command, int *player, bool *landlord_win,
 
 static void settle_round(int landlord, bool landlord_win, int points)
 {
-    const int before[3] = {s_score[0], s_score[1], s_score[2]};
     const int landlord_delta = landlord_win ? points : -points;
     const int farmer_delta = landlord_win ? -(points / 2) : (points / 2);
     const int landlord_index = landlord - 1;
 
     s_landlord = landlord;
 
-    ESP_LOGI(TAG, "Command: P%d landlord %s %d points",
-             landlord, landlord_win ? "wins" : "loses", points);
-    ESP_LOGI(TAG, "Before: P1=%d, P2=%d, P3=%d, total=%d",
-             before[0], before[1], before[2], before[0] + before[1] + before[2]);
+    ESP_LOGI(TAG, "P%d landlord %s %d pts", landlord, landlord_win ? "wins" : "loses", points);
 
     for (int i = 0; i < 3; ++i) {
         s_score[i] += (i == landlord_index) ? landlord_delta : farmer_delta;
     }
 
-    ESP_LOGI(TAG, "Delta: P1=%+d, P2=%+d, P3=%+d",
-             s_score[0] - before[0], s_score[1] - before[1], s_score[2] - before[2]);
-    scorekeeper_print_scores("After");
+    ESP_LOGI(TAG, "Scores: P1=%d, P2=%d, P3=%d", s_score[0], s_score[1], s_score[2]);
 
     if (score_total() != 0) {
         ESP_LOGE(TAG, "Total check failed");
@@ -156,7 +209,19 @@ void scorekeeper_apply_command(int command)
     bool landlord_win = false;
 
     if (parse_score_command_id(command, &player, &landlord_win, &points)) {
+        int64_t before[3];
+        int before_landlord;
+        undo_snapshot_begin(before, &before_landlord);
+
         settle_round(player, landlord_win, points);
+
+        char desc[64];
+        const char *player_name = (player == 1) ? "一号" : (player == 2) ? "二号" : "三号";
+        const char *result = landlord_win ? "赢" : "输";
+        snprintf(desc, sizeof(desc), "%s地主%s%d分", player_name, result, points);
+
+        undo_snapshot_commit(before, before_landlord, false, "%s", desc);
+
         speak_score_update(player, landlord_win, points);
         lcd_ui_update((uint8_t)player, s_score[0], s_score[1], s_score[2], "Score updated");
         return;
@@ -168,21 +233,86 @@ void scorekeeper_apply_command(int command)
         speak_query_score();
         lcd_ui_update((uint8_t)s_landlord, s_score[0], s_score[1], s_score[2], "Querying...");
         break;
-    case CMD_RESET_SCORE:
+    case CMD_RESET_SCORE: {
+        int64_t before[3];
+        int before_landlord;
+        undo_snapshot_begin(before, &before_landlord);
+
         reset_scores();
+        undo_snapshot_commit(before, before_landlord, true, "所有分数重置");
+
         speak_reset();
         lcd_ui_update(0, s_score[0], s_score[1], s_score[2], "Reset complete");
         break;
+    }
     default:
         ESP_LOGW(TAG, "Unknown command id: %d", command);
         break;
     }
 }
 
+bool scorekeeper_undo_last(void)
+{
+    if (s_score_lock == NULL) {
+        s_score_lock = xSemaphoreCreateMutex();
+    }
+    xSemaphoreTake(s_score_lock, portMAX_DELAY);
+
+    bool ok = false;
+    if (!s_last_op.valid) {
+        ESP_LOGW(TAG, "Undo failed: no previous operation");
+        xSemaphoreGive(s_score_lock);
+        tts_play_text("没有可撤销的计分");
+        return false;
+    }
+
+    int64_t now_ms = esp_timer_get_time() / 1000;
+    int64_t elapsed = now_ms - s_last_op.timestamp_ms;
+    if (elapsed > UNDO_WINDOW_MS) {
+        ESP_LOGW(TAG, "Undo failed: window closed (%lld ms ago)", (long long)elapsed);
+        s_last_op.valid = false;
+        xSemaphoreGive(s_score_lock);
+        tts_play_text("撤销时间已超过十秒");
+        return false;
+    }
+
+    /* 回滚 */
+    s_score[0]   = s_last_op.scores_before[0];
+    s_score[1]   = s_last_op.scores_before[1];
+    s_score[2]   = s_last_op.scores_before[2];
+    s_landlord   = s_last_op.landlord_before;
+    s_last_op.valid = false;
+    ok = true;
+
+    char desc_saved[64];
+    snprintf(desc_saved, sizeof(desc_saved), "%s", s_last_op.desc);
+    bool was_reset = s_last_op.was_reset;
+
+    xSemaphoreGive(s_score_lock);
+
+    ESP_LOGI(TAG, "Undo success: rolled back '%s' (elapsed=%lldms)",
+             desc_saved, (long long)elapsed);
+    scorekeeper_print_scores("After undo");
+
+    /* 友好的语音反馈 */
+    char speak[160];
+    if (was_reset) {
+        snprintf(speak, sizeof(speak), "已撤销重置，分数恢复为一号%d分二号%d分三号%d分",
+                 s_score[0], s_score[1], s_score[2]);
+    } else {
+        snprintf(speak, sizeof(speak), "已撤销%s，当前分数一号%d分二号%d分三号%d分",
+                 desc_saved, s_score[0], s_score[1], s_score[2]);
+    }
+    lcd_ui_update((uint8_t)(s_landlord > 0 ? s_landlord : 0),
+                  s_score[0], s_score[1], s_score[2], "已撤销");
+    tts_play_text(speak);
+
+    return ok;
+}
+
 static bool add_command_checked(esp_err_t err, int command_id, const char *phrase)
 {
     if (err == ESP_OK) {
-        ESP_LOGI(TAG, "Add command %d: %s", command_id, phrase);
         return true;
     }
     ESP_LOGE(TAG, "Failed to add command [%s]: %s", phrase, esp_err_to_name(err));

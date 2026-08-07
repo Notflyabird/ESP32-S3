@@ -9,6 +9,7 @@
 #include "scorekeeper.h"
 #include "speech_recognition.h"
 #include "tts_player.h"
+#include "undo_button.h"
 
 static const char *TAG = "DDZ_APP";
 
@@ -62,6 +63,9 @@ void app_main(void)
     speech_recognition_print_pipeline();
 
     lcd_ui_update(0, 0, 0, 0, "Ready - Say Hi ESP");
+
+    /* GPIO0 BOOT 按键：10s 撤销窗口，取消最近一次计分 */
+    undo_button_init();
 
     if (!speech_recognition_start()) {
         ESP_LOGE(TAG, "Failed to create speech tasks");

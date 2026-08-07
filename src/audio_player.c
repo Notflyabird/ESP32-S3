@@ -22,6 +22,8 @@ static const char *TAG = "AUDIO_PLAY";
 /* ====================== 音频参数 ====================== */
 #define SAMPLE_RATE 16000
 #define I2S_BITS    I2S_DATA_BIT_WIDTH_16BIT
+/* TTS PCM 软件增益倍数（TTS 输出振幅偏小，3x 放大提升清晰度） */
+#define TTS_GAIN    3
 
 /* ====================== WAV 头解析 ====================== */
 #pragma pack(push, 1)
@@ -71,20 +73,20 @@ void audio_player_init(void)
     /* --- 创建 I2S1 发送通道 --- */
     i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_1, I2S_ROLE_MASTER);
     chan_cfg.auto_clear = true;
-    chan_cfg.dma_frame_num = 2400;  /* 增大 DMA 缓冲：2400帧 × 2B = 4800 B */
-    chan_cfg.dma_desc_num  = 6;     /* 6 个描述符，总能存下 16KB+ 的 WAV */
+    chan_cfg.dma_frame_num = 512;   /* 512 帧 × 2B = 1024B */
+    chan_cfg.dma_desc_num  = 4;     /* 4 描述符 = 4096B ≈ 128ms 缓冲 */
     ESP_ERROR_CHECK(i2s_new_channel(&chan_cfg, &s_tx_chan, NULL));
 
     /* --- 配置标准 I2S 模式 --- */
     i2s_std_config_t std_cfg = {
         .clk_cfg = {
             .sample_rate_hz = SAMPLE_RATE,
-            .clk_src = I2S_CLK_SRC_PLL_160M,  /* 160 MHz PLL: better precision than DEFAULT */
+            .clk_src = I2S_CLK_SRC_PLL_160M,
             .mclk_multiple = I2S_MCLK_MULTIPLE_256,
         },
         .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_BITS, I2S_SLOT_MODE_MONO),
         .gpio_cfg = {
-            .mclk = I2S_GPIO_UNUSED,    // 不启用 MCLK
+            .mclk = I2S_GPIO_UNUSED,
             .bclk = I2S1_BCLK,
             .ws   = I2S1_LRCLK,
             .dout = I2S1_DOUT,
@@ -96,6 +98,8 @@ void audio_player_init(void)
             },
         },
     };
+    /* MAX98357A 默认从左声道播放，显式指定 LEFT */
+    std_cfg.slot_cfg.slot_mask = I2S_STD_SLOT_LEFT;
     ESP_ERROR_CHECK(i2s_channel_init_std_mode(s_tx_chan, &std_cfg));
     ESP_ERROR_CHECK(i2s_channel_enable(s_tx_chan));
 
@@ -179,8 +183,7 @@ bool audio_play_wav(const uint8_t *wav_buf, size_t buf_len)
     esp_err_t ret = i2s_channel_write(s_tx_chan, pcm_data, pcm_len,
                                        &bytes_written, portMAX_DELAY);
     if (ret == ESP_ERR_TIMEOUT) {
-        // DMA 缓冲区满，稍后重试
-        ESP_LOGW(TAG, "I2S TX timeout, DMA may be full");
+        ESP_LOGW(TAG, "I2S TX timeout");
         return false;
     }
     if (ret != ESP_OK) {
@@ -190,9 +193,6 @@ bool audio_play_wav(const uint8_t *wav_buf, size_t buf_len)
 
     s_pcm_bytes = pcm_len;
     s_playing = true;
-    ESP_LOGI(TAG, "WAV playback started: %u bytes written, %u ms",
-             (unsigned int)bytes_written,
-             (unsigned int)(pcm_len * 1000 / hdr->byte_rate));
     return true;
 }
 
@@ -203,18 +203,35 @@ void audio_play_pcm(const int16_t *pcm_data, size_t sample_count)
 {
     if (!pcm_data || sample_count == 0) return;
 
-    size_t pcm_bytes = sample_count * sizeof(int16_t);
-    size_t bytes_written = 0;
-    esp_err_t ret = i2s_channel_write(s_tx_chan, pcm_data, pcm_bytes,
-                                       &bytes_written, portMAX_DELAY);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "I2S write failed: %s", esp_err_to_name(ret));
-        return;
+    /* 软件增益：TTS 输出振幅偏小，放大 TTS_GAIN 倍提升清晰度 */
+    #define PCM_GAIN_BUF_SIZE  2048
+    static int16_t gain_buf[PCM_GAIN_BUF_SIZE];
+
+    size_t offset = 0;
+    while (offset < sample_count) {
+        size_t chunk = sample_count - offset;
+        if (chunk > PCM_GAIN_BUF_SIZE) chunk = PCM_GAIN_BUF_SIZE;
+
+        for (size_t i = 0; i < chunk; ++i) {
+            int32_t v = (int32_t)pcm_data[offset + i] * TTS_GAIN;
+            if (v > INT16_MAX) v = INT16_MAX;
+            if (v < INT16_MIN) v = INT16_MIN;
+            gain_buf[i] = (int16_t)v;
+        }
+
+        size_t bytes_to_write = chunk * sizeof(int16_t);
+        size_t bytes_written = 0;
+        esp_err_t ret = i2s_channel_write(s_tx_chan, gain_buf, bytes_to_write,
+                                           &bytes_written, portMAX_DELAY);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "I2S write failed: %s", esp_err_to_name(ret));
+            return;
+        }
+        offset += chunk;
     }
 
-    s_pcm_bytes = pcm_bytes;
+    s_pcm_bytes = sample_count * sizeof(int16_t);
     s_playing = true;
-    ESP_LOGD(TAG, "PCM playback started: %u samples", (unsigned int)sample_count);
 }
 
 /* ================================================================== */
@@ -233,7 +250,7 @@ void audio_wait_play_finish(void)
     vTaskDelay(pdMS_TO_TICKS(duration_ms));
 
     s_playing = false;
-    ESP_LOGI(TAG, "Playback finished (%lu ms)", (unsigned long)duration_ms);
+    ESP_LOGD(TAG, "Playback finished (%lu ms)", (unsigned long)duration_ms);
 }
 
 /* ================================================================== */
@@ -294,8 +311,6 @@ static void build_wav_header(uint8_t *buf,
 /** 上电自检：播放内置 beep WAV，验证喇叭连接正常。 */
 void audio_player_self_test(void)
 {
-    ESP_LOGI(TAG, "=== Self-test: playing 440 Hz beep ===");
-
     // 构造内存 WAV
     #define WAV_HEADER_SIZE 44
     uint8_t wav_buf[WAV_HEADER_SIZE + TEST_BEEP_PCM_BYTES];
@@ -384,7 +399,7 @@ static float amp_hao(float p) {
 
 void audio_play_hello(void)
 {
-    ESP_LOGI(TAG, "=== Playing synthesized 'ni hao' (improved) ===");
+    ESP_LOGI(TAG, "Playing 'ni hao'");
 
     const int sr       = SAMPLE_RATE;
 
@@ -422,7 +437,6 @@ void audio_play_hello(void)
 
     if (audio_play_wav(wav_buf, wav_total)) {
         audio_wait_play_finish();
-        ESP_LOGI(TAG, "'ni hao' done (%d ms)", 320 + 30 + 380);
     } else {
         ESP_LOGE(TAG, "'ni hao' failed");
     }

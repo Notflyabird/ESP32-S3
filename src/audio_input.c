@@ -6,6 +6,7 @@
 #include "app_config.h"
 #include "driver/i2s_std.h"
 #include "esp_heap_caps.h"
+#include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 
 /* I2S0 RX channel handle */
@@ -40,8 +41,12 @@ void audio_input_init(void)
             },
         },
     };
+    /* INMP441 L/R 接 GND → 左声道，显式指定 LEFT 时隙，避免默认值不确定 */
+    std_cfg.slot_cfg.slot_mask = I2S_STD_SLOT_LEFT;
     ESP_ERROR_CHECK(i2s_channel_init_std_mode(s_rx_chan, &std_cfg));
     ESP_ERROR_CHECK(i2s_channel_enable(s_rx_chan));
+    ESP_LOGI("AUDIO_IN", "I2S0 INMP441 ready: 16kHz 32bit mono, BCLK=%d WS=%d SD=%d",
+             APP_PIN_BCLK, APP_PIN_WS, APP_PIN_SD);
 }
 
 void *audio_input_alloc(size_t size)
