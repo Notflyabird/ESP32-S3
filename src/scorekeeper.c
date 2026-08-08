@@ -1,6 +1,5 @@
 #include "scorekeeper.h"
 
-#include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -12,7 +11,7 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "lcd_ui.h"
-#include "tts_player.h"
+#include "voice_player.h"
 
 static const char *TAG = "DDZ_SCORE";
 
@@ -39,7 +38,10 @@ typedef struct {
     int        landlord_after;   /* 操作后地主号 */
     bool       was_reset;        /* 是否是重置操作 */
     int64_t    timestamp_ms;     /* 操作完成的时间戳 */
-    char       desc[64];         /* 操作描述（用于 TTS 反馈） */
+    /* 被撤销的操作（结构化，供语音反馈重建句子）*/
+    int        op_player;        /* 计分玩家 1-3，重置时为 0 */
+    bool       op_landlord_win;  /* true=地主赢，false=地主输 */
+    int        op_points;        /* 计分分值 */
 } undo_snapshot_t;
 
 static undo_snapshot_t s_last_op;
@@ -108,7 +110,8 @@ static void undo_snapshot_begin(int64_t *save_scores, int *save_landlord)
 }
 
 static void undo_snapshot_commit(const int64_t *scores_before, int landlord_before,
-                                 bool was_reset, const char *desc_fmt, ...)
+                                 bool was_reset, int op_player,
+                                 bool op_landlord_win, int op_points)
 {
     s_last_op.valid = true;
     s_last_op.scores_before[0] = (int)scores_before[0];
@@ -118,11 +121,9 @@ static void undo_snapshot_commit(const int64_t *scores_before, int landlord_befo
     s_last_op.landlord_after  = s_landlord;
     s_last_op.was_reset       = was_reset;
     s_last_op.timestamp_ms    = esp_timer_get_time() / 1000;
-
-    va_list ap;
-    va_start(ap, desc_fmt);
-    vsnprintf(s_last_op.desc, sizeof(s_last_op.desc), desc_fmt, ap);
-    va_end(ap);
+    s_last_op.op_player       = op_player;
+    s_last_op.op_landlord_win = op_landlord_win;
+    s_last_op.op_points       = op_points;
 
     xSemaphoreGive(s_score_lock);
 }
@@ -181,25 +182,17 @@ static void settle_round(int landlord, bool landlord_win, int points)
 
 static void speak_score_update(int player, bool landlord_win, int points)
 {
-    char text[128];
-    const char *player_name = (player == 1) ? "一号" : (player == 2) ? "二号" : "三号";
-    const char *result = landlord_win ? "赢" : "输";
-    
-    snprintf(text, sizeof(text), "%s地主%s%d分", player_name, result, points);
-    tts_play_text(text);
+    voice_speak_score_update((uint8_t)player, landlord_win, points);
 }
 
 static void speak_query_score(void)
 {
-    char text[128];
-    snprintf(text, sizeof(text), "当前分数，一号%d分，二号%d分，三号%d分",
-             s_score[0], s_score[1], s_score[2]);
-    tts_play_text(text);
+    voice_speak_query(s_score[0], s_score[1], s_score[2]);
 }
 
 static void speak_reset(void)
 {
-    tts_play_text("分数已重置");
+    voice_speak_reset();
 }
 
 void scorekeeper_apply_command(int command)
@@ -215,12 +208,8 @@ void scorekeeper_apply_command(int command)
 
         settle_round(player, landlord_win, points);
 
-        char desc[64];
-        const char *player_name = (player == 1) ? "一号" : (player == 2) ? "二号" : "三号";
-        const char *result = landlord_win ? "赢" : "输";
-        snprintf(desc, sizeof(desc), "%s地主%s%d分", player_name, result, points);
-
-        undo_snapshot_commit(before, before_landlord, false, "%s", desc);
+        undo_snapshot_commit(before, before_landlord, false,
+                             player, landlord_win, points);
 
         speak_score_update(player, landlord_win, points);
         lcd_ui_update((uint8_t)player, s_score[0], s_score[1], s_score[2], "Score updated");
@@ -239,7 +228,7 @@ void scorekeeper_apply_command(int command)
         undo_snapshot_begin(before, &before_landlord);
 
         reset_scores();
-        undo_snapshot_commit(before, before_landlord, true, "所有分数重置");
+        undo_snapshot_commit(before, before_landlord, true, 0, false, 0);
 
         speak_reset();
         lcd_ui_update(0, s_score[0], s_score[1], s_score[2], "Reset complete");
@@ -262,7 +251,7 @@ bool scorekeeper_undo_last(void)
     if (!s_last_op.valid) {
         ESP_LOGW(TAG, "Undo failed: no previous operation");
         xSemaphoreGive(s_score_lock);
-        tts_play_text("没有可撤销的计分");
+        voice_speak_undo_none();
         return false;
     }
 
@@ -272,7 +261,7 @@ bool scorekeeper_undo_last(void)
         ESP_LOGW(TAG, "Undo failed: window closed (%lld ms ago)", (long long)elapsed);
         s_last_op.valid = false;
         xSemaphoreGive(s_score_lock);
-        tts_play_text("撤销时间已超过十秒");
+        voice_speak_undo_timeout();
         return false;
     }
 
@@ -284,28 +273,23 @@ bool scorekeeper_undo_last(void)
     s_last_op.valid = false;
     ok = true;
 
-    char desc_saved[64];
-    snprintf(desc_saved, sizeof(desc_saved), "%s", s_last_op.desc);
-    bool was_reset = s_last_op.was_reset;
+    /* 释放锁前拷贝结构化字段，供锁外语音反馈使用 */
+    bool was_reset       = s_last_op.was_reset;
+    int  op_player       = s_last_op.op_player;
+    bool op_landlord_win = s_last_op.op_landlord_win;
+    int  op_points       = s_last_op.op_points;
+    int  s1 = s_score[0], s2 = s_score[1], s3 = s_score[2];
+    uint8_t landlord_disp = (uint8_t)(s_landlord > 0 ? s_landlord : 0);
 
     xSemaphoreGive(s_score_lock);
 
-    ESP_LOGI(TAG, "Undo success: rolled back '%s' (elapsed=%lldms)",
-             desc_saved, (long long)elapsed);
+    ESP_LOGI(TAG, "Undo success: rolled back op(player=%d,win=%d,pts=%d,reset=%d) (elapsed=%lldms)",
+             op_player, op_landlord_win, op_points, was_reset, (long long)elapsed);
     scorekeeper_print_scores("After undo");
 
-    /* 友好的语音反馈 */
-    char speak[160];
-    if (was_reset) {
-        snprintf(speak, sizeof(speak), "已撤销重置，分数恢复为一号%d分二号%d分三号%d分",
-                 s_score[0], s_score[1], s_score[2]);
-    } else {
-        snprintf(speak, sizeof(speak), "已撤销%s，当前分数一号%d分二号%d分三号%d分",
-                 desc_saved, s_score[0], s_score[1], s_score[2]);
-    }
-    lcd_ui_update((uint8_t)(s_landlord > 0 ? s_landlord : 0),
-                  s_score[0], s_score[1], s_score[2], "已撤销");
-    tts_play_text(speak);
+    lcd_ui_update(landlord_disp, s1, s2, s3, "已撤销");
+    voice_speak_undo_result(was_reset, (uint8_t)op_player, op_landlord_win,
+                            op_points, s1, s2, s3);
 
     return ok;
 }

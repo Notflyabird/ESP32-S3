@@ -16,7 +16,7 @@
 #include "lcd_ui.h"
 #include "model_path.h"
 #include "scorekeeper.h"
-#include "tts_player.h"
+#include "voice_player.h"
 
 extern volatile bool g_sr_paused;
 
@@ -202,7 +202,7 @@ static void detect_task(void *arg)
 
     bool command_session = false;
     bool timed_out = false;
-    ESP_LOGI(TAG, "SR detect task started, waiting for wake word (Hi ESP)");
+    ESP_LOGI(TAG, "SR detect task started, waiting for wake word (你好小鑫)");
 
     while (true) {
         afe_fetch_result_t *result = speech->afe_iface->fetch(speech->afe_data);
@@ -216,7 +216,7 @@ static void detect_task(void *arg)
             int s1, s2, s3, landlord;
             scorekeeper_get_scores(&s1, &s2, &s3, &landlord);
             lcd_ui_update((uint8_t)landlord, s1, s2, s3, "我在听...");
-            tts_play_text("我在");
+            voice_speak_im_here();
             speech->chinese.iface->clean(speech->chinese.data);
             speech->afe_iface->disable_wakenet(speech->afe_data);
             command_session = true;
@@ -238,7 +238,7 @@ static void detect_task(void *arg)
             command_session = false;
             int s1, s2, s3, landlord;
             scorekeeper_get_scores(&s1, &s2, &s3, &landlord);
-            lcd_ui_update((uint8_t)landlord, s1, s2, s3, "Ready - Say Hi ESP");
+            lcd_ui_update((uint8_t)landlord, s1, s2, s3, "Ready - NiHaoXiaoXin");
         }
     }
 }

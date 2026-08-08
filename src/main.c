@@ -8,8 +8,8 @@
 #include "lcd_ui.h"
 #include "scorekeeper.h"
 #include "speech_recognition.h"
-#include "tts_player.h"
 #include "undo_button.h"
+#include "voice_player.h"
 
 static const char *TAG = "DDZ_APP";
 
@@ -36,14 +36,14 @@ void app_main(void)
     audio_player_init();
     audio_player_self_test();
 
-    /* ---------- TTS init ---------- */
-    if (!tts_player_init()) {
-        ESP_LOGE(TAG, "TTS init failed");
+    /* ---------- Voice player init (pre-generated assets) ---------- */
+    if (!voice_player_init()) {
+        ESP_LOGE(TAG, "Voice player init failed");
         return;
     }
-    tts_play_text("语音斗地主计分系统已启动");
-    
-    while (tts_is_playing()) {
+    voice_speak_boot();
+
+    while (voice_is_playing()) {
         vTaskDelay(pdMS_TO_TICKS(50));
     }
 
@@ -61,7 +61,7 @@ void app_main(void)
     scorekeeper_print_scores("Initial");
     speech_recognition_print_pipeline();
 
-    lcd_ui_update(0, 0, 0, 0, "Ready - Say Hi ESP");
+    lcd_ui_update(0, 0, 0, 0, "Ready - NiHaoXiaoXin");
 
     /* GPIO0 BOOT 按键：10s 撤销窗口，取消最近一次计分 */
     undo_button_init();
