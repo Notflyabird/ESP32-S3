@@ -36,3 +36,21 @@
 #define SPEAKER_PIN_DOUT      GPIO_NUM_17
 #define SPEAKER_PIN_SD        GPIO_NUM_18   /* SD 静音引脚 */
 
+/* ====================== 音频 DSP 处理链 ======================== */
+/* TTS 输出 16kHz mono → 上采样到 48kHz stereo 输出 MAX98357A */
+#define DSP_INPUT_RATE        16000          /* TTS PCM 输入采样率 */
+#define DSP_OUTPUT_RATE       48000          /* I2S 输出采样率 */
+#define DSP_UPSAMPLE_L        3              /* 上采样因子 (16k→48k) */
+
+/* DC 阻塞滤波器（一阶 IIR 高通，16kHz 域）*/
+#define DC_BLOCK_FC_HZ        40             /* 截止频率，低于语音基频 80Hz */
+
+/* AGC 动态增益（RMS 反馈式，16kHz 域）*/
+#define AGC_TARGET_RMS        6000.0f        /* 目标 RMS 电平 (int16 域, ≈-14.7dBFS) */
+#define AGC_TAU_WIN_MS        30             /* RMS 估计窗口时间常数 */
+#define AGC_TAU_ATK_MS        20             /* attack 时间常数（信号变大时快速降增益）*/
+#define AGC_TAU_REL_MS        200            /* release 时间常数（信号变小时缓慢升增益）*/
+#define AGC_GAIN_MIN          0.5f           /* 最小增益，防过压缩 */
+#define AGC_GAIN_MAX          8.0f           /* 最大增益，防噪声放大 */
+#define AGC_GAIN_INIT         3.0f           /* 句首初始增益，匹配原 ×3 听感 */
+

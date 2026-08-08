@@ -135,6 +135,10 @@ static void tts_task(void *arg)
 
         audio_set_mute(false);
 
+        /* 句首重置 DSP 链（DC/AGC/上采样），避免句间静默致 AGC 增益漂移，
+           并消除上一句残留状态对首音节的影响 */
+        audio_player_reset_dsp();
+
         if (esp_tts_parse_chinese(s_tts, text) != 1) {
             ESP_LOGE(TAG, "TTS parse failed for: %s", text);
             goto cleanup;
@@ -153,9 +157,9 @@ static void tts_task(void *arg)
             total_samples += len;
         }
 
-        /* 等待 DMA buffer 排空：128ms buffer + 100ms 余量 */
+        /* 等待 DMA buffer 排空：384ms buffer + 100ms 余量 */
         if (total_samples > 0) {
-            vTaskDelay(pdMS_TO_TICKS(250));
+            vTaskDelay(pdMS_TO_TICKS(500));
         }
 
 cleanup:

@@ -31,6 +31,14 @@ void audio_player_init(void);
 void audio_set_mute(bool mute_en);
 
 /**
+ * @brief 重置音频 DSP 链状态（DC 阻塞 / AGC / 上采样）。
+ *
+ * 应在每句 TTS 流式播放开始前调用，避免句间静默导致 AGC 增益漂移，
+ * 并消除上一句残留的 DC/延迟线状态对首音节的影响。
+ */
+void audio_player_reset_dsp(void);
+
+/**
  * @brief 播放内存中的 WAV 音频（PCM, 16 bit, 单声道）。
  *
  * 函数立即返回，不阻塞。播放完成后可通过

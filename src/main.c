@@ -35,7 +35,6 @@ void app_main(void)
     /* ---------- Speaker init (I2S1, MAX98357A) ---------- */
     audio_player_init();
     audio_player_self_test();
-    // audio_play_hello();
 
     /* ---------- TTS init ---------- */
     if (!tts_player_init()) {

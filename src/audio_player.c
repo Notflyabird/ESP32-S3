@@ -4,26 +4,31 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "app_config.h"
+#include "audio_dsp.h"
 #include "driver/gpio.h"
 #include "driver/i2s_std.h"
 #include "esp_check.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
 static const char *TAG = "AUDIO_PLAY";
 
-/* ====================== 引脚定义 ====================== */
-#define I2S1_BCLK  GPIO_NUM_15
-#define I2S1_LRCLK GPIO_NUM_16
-#define I2S1_DOUT  GPIO_NUM_17
-#define SD_MUTE_PIN GPIO_NUM_18
+/* ====================== 引脚定义（与 app_config.h SPEAKER_PIN_* 一致）====================== */
+#define I2S1_BCLK   SPEAKER_PIN_BCLK
+#define I2S1_LRCLK  SPEAKER_PIN_LRCLK
+#define I2S1_DOUT   SPEAKER_PIN_DOUT
+#define SD_MUTE_PIN SPEAKER_PIN_SD
 
 /* ====================== 音频参数 ====================== */
-#define SAMPLE_RATE 16000
-#define I2S_BITS    I2S_DATA_BIT_WIDTH_16BIT
-/* TTS PCM 软件增益倍数（TTS 输出振幅偏小，3x 放大提升清晰度） */
-#define TTS_GAIN    3
+/* I2S 输出 48kHz stereo（DSP 上采样后）；输入域 16kHz 见 DSP_INPUT_RATE */
+#define I2S_BITS            I2S_DATA_BIT_WIDTH_16BIT
+/* STEREO 模式：MAX98357A 是立体声功放，双声道填充确保数据连续 */
+#define PLAYBACK_CHANNELS   2
+/* 渲染分块：每次处理 2048 个 16kHz 输入样本 → 6144 个 48kHz 输出样本 */
+#define RENDER_INPUT_CHUNK  2048
 
 /* ====================== WAV 头解析 ====================== */
 #pragma pack(push, 1)
@@ -49,10 +54,15 @@ typedef struct {
 
 /* ====================== 播放状态 ====================== */
 static bool s_playing = false;
-static size_t s_pcm_bytes = 0;  // 当前播放 PCM 数据字节数（用于计算时长）
+static size_t s_pcm_bytes = 0;  /* 已写入 I2S 的 48kHz stereo 字节数（用于时长计算） */
 
 /* ---------- I2S1 通道句柄 ---------- */
 static i2s_chan_handle_t s_tx_chan = NULL;
+
+/* ---------- DSP 链 + PSRAM 输出缓冲 ---------- */
+static dsp_chain_t s_dsp;                /* DC 阻塞 / AGC / 上采样 状态 */
+static float    *s_dsp_out    = NULL;    /* DSP 输出 float[RENDER_INPUT_CHUNK*L] = 24KB PSRAM */
+static int16_t  *s_out_stereo = NULL;    /* stereo int16[RENDER_INPUT_CHUNK*L*2] = 24KB PSRAM */
 
 /* ================================================================== */
 /*  I2S 初始化                                                         */
@@ -71,20 +81,20 @@ void audio_player_init(void)
     gpio_set_level(SD_MUTE_PIN, 1);  // 上电解锁静音（SD = HIGH）
 
     /* --- 创建 I2S1 发送通道 --- */
-    i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_1, I2S_ROLE_MASTER);
+    i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(SPEAKER_I2S_PORT, I2S_ROLE_MASTER);
     chan_cfg.auto_clear = true;
-    chan_cfg.dma_frame_num = 512;   /* 512 帧 × 2B = 1024B */
-    chan_cfg.dma_desc_num  = 4;     /* 4 描述符 = 4096B ≈ 128ms 缓冲 */
+    chan_cfg.dma_frame_num = 1024;  /* 1024 帧 × 4B(stereo) = 4096B */
+    chan_cfg.dma_desc_num  = 6;     /* 6 描述符 = 24KB ≈ 128ms 缓冲 @48kHz stereo */
     ESP_ERROR_CHECK(i2s_new_channel(&chan_cfg, &s_tx_chan, NULL));
 
-    /* --- 配置标准 I2S 模式 --- */
+    /* --- 配置标准 I2S 模式（STEREO，48kHz：DSP 上采样后输出） --- */
     i2s_std_config_t std_cfg = {
         .clk_cfg = {
-            .sample_rate_hz = SAMPLE_RATE,
+            .sample_rate_hz = DSP_OUTPUT_RATE,
             .clk_src = I2S_CLK_SRC_PLL_160M,
             .mclk_multiple = I2S_MCLK_MULTIPLE_256,
         },
-        .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_BITS, I2S_SLOT_MODE_MONO),
+        .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_BITS, I2S_SLOT_MODE_STEREO),
         .gpio_cfg = {
             .mclk = I2S_GPIO_UNUSED,
             .bclk = I2S1_BCLK,
@@ -98,23 +108,95 @@ void audio_player_init(void)
             },
         },
     };
-    /* MAX98357A 默认从左声道播放，显式指定 LEFT */
-    std_cfg.slot_cfg.slot_mask = I2S_STD_SLOT_LEFT;
     ESP_ERROR_CHECK(i2s_channel_init_std_mode(s_tx_chan, &std_cfg));
     ESP_ERROR_CHECK(i2s_channel_enable(s_tx_chan));
 
-    ESP_LOGI(TAG, "I2S1 initialized: %d Hz mono, BCLK=%d LRCLK=%d DOUT=%d SD=%d",
-             SAMPLE_RATE, I2S1_BCLK, I2S1_LRCLK, I2S1_DOUT, SD_MUTE_PIN);
+    /* --- 分配 PSRAM 输出缓冲（DMA 用户缓冲，驱动会拷贝到内部 DMA buf） --- */
+    size_t dsp_out_bytes   = RENDER_INPUT_CHUNK * DSP_UPSAMPLE_L * sizeof(float);
+    size_t stereo_buf_bytes = RENDER_INPUT_CHUNK * DSP_UPSAMPLE_L * PLAYBACK_CHANNELS * sizeof(int16_t);
+    s_dsp_out = (float *)heap_caps_malloc(dsp_out_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    s_out_stereo = (int16_t *)heap_caps_malloc(stereo_buf_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (s_dsp_out == NULL) {
+        s_dsp_out = (float *)malloc(dsp_out_bytes);  /* 回退内部 RAM */
+    }
+    if (s_out_stereo == NULL) {
+        s_out_stereo = (int16_t *)malloc(stereo_buf_bytes);
+    }
+    ESP_ERROR_CHECK(s_dsp_out == NULL || s_out_stereo == NULL ? ESP_ERR_NO_MEM : ESP_OK);
+
+    /* --- 初始化 DSP 链 --- */
+    dsp_chain_reset(&s_dsp);
+
+    ESP_LOGI(TAG, "I2S1 initialized: %d Hz stereo, BCLK=%d LRCLK=%d DOUT=%d SD=%d",
+             DSP_OUTPUT_RATE, I2S1_BCLK, I2S1_LRCLK, I2S1_DOUT, SD_MUTE_PIN);
+    ESP_LOGI(TAG, "DSP chain ready: %d->%d Hz (L=%d), DC block + AGC + upsampling",
+             DSP_INPUT_RATE, DSP_OUTPUT_RATE, DSP_UPSAMPLE_L);
 }
 
 /* ================================================================== */
-/*  静音控制                                                           */
+/*  静音控制（渐变：避免功放突然开/关产生"啪"爆音）                    */
 /* ================================================================== */
 void audio_set_mute(bool mute_en)
 {
-    int level = mute_en ? 0 : 1;   // LOW=静音, HIGH=播放
-    gpio_set_level(SD_MUTE_PIN, level);
-    ESP_LOGD(TAG, "Mute %s", mute_en ? "ON" : "OFF");
+    if (!mute_en) {
+        /* 解除静音：先拉高 SD，等待功放稳定再播放 */
+        gpio_set_level(SD_MUTE_PIN, 1);
+        vTaskDelay(pdMS_TO_TICKS(10));
+    } else {
+        /* 静音：等待最后的数据播完，再拉低 SD */
+        vTaskDelay(pdMS_TO_TICKS(5));
+        gpio_set_level(SD_MUTE_PIN, 0);
+    }
+}
+
+/* ================================================================== */
+/*  DSP 链重置（句首调用）                                              */
+/* ================================================================== */
+void audio_player_reset_dsp(void)
+{
+    dsp_chain_reset(&s_dsp);
+    s_pcm_bytes = 0;   /* 句首清零播放统计，供 audio_wait_play_finish 计算时长 */
+}
+
+/* ================================================================== */
+/*  核心渲染：16kHz mono int16 → 48kHz stereo I2S                      */
+/*  完整链: DC 阻塞 → AGC → 3× 上采样 → tanh 软限幅 → mono→stereo      */
+/*  → i2s_channel_write（复用 PSRAM 缓冲 s_out_stereo）               */
+/* ================================================================== */
+static void audio_render_mono(const int16_t *mono, size_t sample_count)
+{
+    size_t offset = 0;
+    while (offset < sample_count) {
+        size_t chunk = sample_count - offset;
+        if (chunk > RENDER_INPUT_CHUNK) chunk = RENDER_INPUT_CHUNK;
+
+        /* ①②③ DC 阻塞 → AGC → 3× 上采样: 16kHz int16 → 48kHz float */
+        dsp_chain_process(&s_dsp, mono + offset, chunk, s_dsp_out);
+
+        /* ④ tanh 软限幅 + 饱和 int16 + ⑤ mono→stereo */
+        size_t out_samples = chunk * DSP_UPSAMPLE_L;
+        for (size_t i = 0; i < out_samples; ++i) {
+            /* tanh 在 48kHz 域限幅，避免 16kHz 域谐波混叠回可听频带 */
+            float fv = s_dsp_out[i] / 32768.0f;
+            fv = tanhf(fv) * 32767.0f;
+            int16_t s = (int16_t)fv;
+            s_out_stereo[i * 2]     = s;  /* L */
+            s_out_stereo[i * 2 + 1] = s;  /* R */
+        }
+
+        /* ⑥ 写入 I2S（阻塞，自动等待 DMA 有空位） */
+        size_t bytes_to_write = out_samples * PLAYBACK_CHANNELS * sizeof(int16_t);
+        size_t bytes_written = 0;
+        esp_err_t ret = i2s_channel_write(s_tx_chan, s_out_stereo,
+                                           bytes_to_write, &bytes_written, portMAX_DELAY);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "I2S write failed: %s", esp_err_to_name(ret));
+            return;
+        }
+        s_pcm_bytes += bytes_written;
+        offset += chunk;
+    }
+    s_playing = true;
 }
 
 /* ================================================================== */
@@ -178,60 +260,38 @@ bool audio_play_wav(const uint8_t *wav_buf, size_t buf_len)
              (unsigned int)hdr->bits_per_sample,
              (unsigned int)pcm_len);
 
-    /* 写入全部 PCM 数据到 I2S TX DMA */
-    size_t bytes_written = 0;
-    esp_err_t ret = i2s_channel_write(s_tx_chan, pcm_data, pcm_len,
-                                       &bytes_written, portMAX_DELAY);
-    if (ret == ESP_ERR_TIMEOUT) {
-        ESP_LOGW(TAG, "I2S TX timeout");
-        return false;
-    }
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "I2S write failed: %s", esp_err_to_name(ret));
+    /* 校验格式：仅支持 mono 16bit PCM（输入域 16kHz，DSP 上采样到 48kHz 输出）*/
+    if (hdr->channels != 1 || hdr->bits_per_sample != 16) {
+        ESP_LOGE(TAG, "Unsupported WAV: %u ch, %u bits (expect 1 ch, 16 bits)",
+                 (unsigned int)hdr->channels, (unsigned int)hdr->bits_per_sample);
         return false;
     }
 
-    s_pcm_bytes = pcm_len;
-    s_playing = true;
-    return true;
+    size_t num_samples = pcm_len / sizeof(int16_t);
+    if (num_samples == 0) {
+        ESP_LOGE(TAG, "Empty WAV data");
+        return false;
+    }
+
+    /* 句首重置 DSP 链 + 清零播放统计（WAV 独立播放，每次都是新句）*/
+    audio_player_reset_dsp();
+
+    /* 渲染播放：16kHz mono → DC 阻塞 → AGC → 上采样 → tanh → stereo → I2S */
+    audio_render_mono((const int16_t *)pcm_data, num_samples);
+    return s_playing;
 }
 
 /* ================================================================== */
-/*  PCM 直接播放                                                        */
+/*  PCM 直接播放（TTS 流式输出）                                        */
+/*  完整 DSP 链由 audio_render_mono 统一处理：                          */
+/*  DC 阻塞 → AGC → 3× 上采样 → tanh → mono→stereo → I2S              */
+/*  注：流式播放不重置 DSP（跨 chunk 维持状态），句首由                  */
+/*  tts_player 调用 audio_player_reset_dsp() 重置。                    */
 /* ================================================================== */
 void audio_play_pcm(const int16_t *pcm_data, size_t sample_count)
 {
     if (!pcm_data || sample_count == 0) return;
-
-    /* 软件增益：TTS 输出振幅偏小，放大 TTS_GAIN 倍提升清晰度 */
-    #define PCM_GAIN_BUF_SIZE  2048
-    static int16_t gain_buf[PCM_GAIN_BUF_SIZE];
-
-    size_t offset = 0;
-    while (offset < sample_count) {
-        size_t chunk = sample_count - offset;
-        if (chunk > PCM_GAIN_BUF_SIZE) chunk = PCM_GAIN_BUF_SIZE;
-
-        for (size_t i = 0; i < chunk; ++i) {
-            int32_t v = (int32_t)pcm_data[offset + i] * TTS_GAIN;
-            if (v > INT16_MAX) v = INT16_MAX;
-            if (v < INT16_MIN) v = INT16_MIN;
-            gain_buf[i] = (int16_t)v;
-        }
-
-        size_t bytes_to_write = chunk * sizeof(int16_t);
-        size_t bytes_written = 0;
-        esp_err_t ret = i2s_channel_write(s_tx_chan, gain_buf, bytes_to_write,
-                                           &bytes_written, portMAX_DELAY);
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "I2S write failed: %s", esp_err_to_name(ret));
-            return;
-        }
-        offset += chunk;
-    }
-
-    s_pcm_bytes = sample_count * sizeof(int16_t);
-    s_playing = true;
+    audio_render_mono(pcm_data, sample_count);
 }
 
 /* ================================================================== */
@@ -241,11 +301,12 @@ void audio_wait_play_finish(void)
 {
     if (!s_playing) return;
 
-    // 计算理论播放总时长：
-    //   16 bit 单声道 @ 16000 Hz → 32000 bytes/s
-    //   duration_ms = pcm_bytes * 1000 / 32000
-    //   加 20 ms 余量覆盖 DMA FIFO 排空和中断延迟
-    uint32_t duration_ms = (uint32_t)(s_pcm_bytes * 1000 / 32000) + 20;
+    /* 计算理论播放总时长：
+     *   16 bit stereo @ 48000 Hz → 192000 bytes/s
+     *   duration_ms = pcm_bytes * 1000 / 192000
+     *   加 20 ms 余量覆盖 DMA FIFO 排空和中断延迟
+     */
+    uint32_t duration_ms = (uint32_t)(s_pcm_bytes * 1000 / (DSP_OUTPUT_RATE * PLAYBACK_CHANNELS * 2)) + 20;
 
     vTaskDelay(pdMS_TO_TICKS(duration_ms));
 
@@ -314,7 +375,7 @@ void audio_player_self_test(void)
     // 构造内存 WAV
     #define WAV_HEADER_SIZE 44
     uint8_t wav_buf[WAV_HEADER_SIZE + TEST_BEEP_PCM_BYTES];
-    build_wav_header(wav_buf, TEST_BEEP_PCM_BYTES, 1, SAMPLE_RATE, 16);
+    build_wav_header(wav_buf, TEST_BEEP_PCM_BYTES, 1, DSP_INPUT_RATE, 16);
     memcpy(wav_buf + WAV_HEADER_SIZE, test_beep_pcm, TEST_BEEP_PCM_BYTES);
 
     audio_set_mute(false);  // 解除静音
@@ -401,7 +462,7 @@ void audio_play_hello(void)
 {
     ESP_LOGI(TAG, "Playing 'ni hao'");
 
-    const int sr       = SAMPLE_RATE;
+    const int sr       = DSP_INPUT_RATE;
 
     /* 音节 1 "nǐ": 三声降升调, 320 ms (原200太短) */
     #define N_S1   (sr * 320 / 1000)
