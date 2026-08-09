@@ -22,6 +22,14 @@ extern volatile bool g_sr_paused;
 
 static const char *TAG = "DDZ_SR";
 
+/* 概率阈值：低于此值的识别结果视为不可靠，过滤不计分。
+ * ESP-SR MultiNet 总会返回最高概率匹配（哪怕说的是噪声），
+ * 典型正常语音 prob > 0.4，纯噪声/碰撞声 < 0.2。
+ * 0.30 仅过滤明显噪声，保留模糊识别以兼顾灵敏度。*/
+#define COMMAND_PROB_THRESHOLD  0.30f
+/* 连续低概率次数达到此值后播放"没听清"提示 */
+#define LOW_PROB_HINT_LIMIT     2
+
 typedef struct {
     const char *language;
     const esp_mn_iface_t *iface;
@@ -167,8 +175,10 @@ static void feed_task(void *arg)
     }
 }
 
-static int detect_command(multinet_model_t *model, int16_t *audio, bool *timed_out)
+static int detect_command(multinet_model_t *model, int16_t *audio,
+                          bool *timed_out, bool *rejected)
 {
+    *rejected = false;
     esp_mn_state_t state = model->iface->detect(model->data, audio);
     if (state == ESP_MN_STATE_TIMEOUT) {
         *timed_out = true;
@@ -180,6 +190,15 @@ static int detect_command(multinet_model_t *model, int16_t *audio, bool *timed_o
 
     esp_mn_results_t *results = model->iface->get_results(model->data);
     if (results == NULL || results->num <= 0) {
+        return -1;
+    }
+
+    /* 概率阈值过滤：低于阈值视为不可靠，清除状态让 MultiNet 重新检测 */
+    if (results->prob[0] < COMMAND_PROB_THRESHOLD) {
+        ESP_LOGW(TAG, "Command %d rejected: prob=%.3f < %.2f",
+                 results->command_id[0], results->prob[0], COMMAND_PROB_THRESHOLD);
+        *rejected = true;
+        model->iface->clean(model->data);
         return -1;
     }
 
@@ -202,6 +221,7 @@ static void detect_task(void *arg)
 
     bool command_session = false;
     bool timed_out = false;
+    int  low_prob_count = 0;     /* 连续低概率次数 */
     ESP_LOGI(TAG, "SR detect task started, waiting for wake word (你好小鑫)");
 
     while (true) {
@@ -221,18 +241,32 @@ static void detect_task(void *arg)
             speech->afe_iface->disable_wakenet(speech->afe_data);
             command_session = true;
             timed_out = false;
+            low_prob_count = 0;
         }
 
         if (!command_session) {
             continue;
         }
 
-        int command = detect_command(&speech->chinese, result->data, &timed_out);
+        bool rejected = false;
+        int command = detect_command(&speech->chinese, result->data,
+                                     &timed_out, &rejected);
         if (command >= 0) {
+            /* 合法命令：重置计数，执行计分 */
+            low_prob_count = 0;
             scorekeeper_apply_command(command);
             speech->chinese.iface->clean(speech->chinese.data);
             speech->afe_iface->enable_wakenet(speech->afe_data);
             command_session = false;
+        } else if (rejected) {
+            /* 低概率被过滤：连续多次后提示"没听清" */
+            low_prob_count++;
+            if (low_prob_count >= LOW_PROB_HINT_LIMIT) {
+                ESP_LOGI(TAG, "Low prob x%d -> speak unclear hint", low_prob_count);
+                voice_speak_command_unclear();
+                low_prob_count = 0;
+            }
+            /* command_session 保持 true，继续等待用户重说 */
         } else if (timed_out) {
             speech->afe_iface->enable_wakenet(speech->afe_data);
             command_session = false;

@@ -37,6 +37,7 @@ typedef enum {
     VOICE_JOB_VIEW_LOG,
     VOICE_JOB_CLEAR_LOG,
     VOICE_JOB_LOG_EXIT,
+    VOICE_JOB_UNCLEAR,
 } voice_job_type_t;
 
 typedef struct {
@@ -160,6 +161,9 @@ static void voice_task(void *arg)
             break;
         case VOICE_JOB_LOG_EXIT:
             ids[n++] = VOICE_ASSET_LOG_EXIT;
+            break;
+        case VOICE_JOB_UNCLEAR:
+            ids[n++] = VOICE_ASSET_UNCLEAR;
             break;
         }
 
@@ -305,5 +309,11 @@ void voice_speak_clear_log(void)
 void voice_speak_log_exit(void)
 {
     voice_job_t j = { .type = VOICE_JOB_LOG_EXIT };
+    enqueue(&j);
+}
+
+void voice_speak_command_unclear(void)
+{
+    voice_job_t j = { .type = VOICE_JOB_UNCLEAR };
     enqueue(&j);
 }

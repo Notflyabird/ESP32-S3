@@ -42,6 +42,7 @@ void voice_speak_undo_result(bool was_reset, uint8_t op_player,
 void voice_speak_view_log(void);                                            /* 进入日志查看 */
 void voice_speak_clear_log(void);                                           /* 计分日志已清空 */
 void voice_speak_log_exit(void);                                            /* 返回主页 */
+void voice_speak_command_unclear(void);                                     /* 没听清请再说一次 */
 
 #ifdef __cplusplus
 }

@@ -26,6 +26,6 @@ foreach(wav
         landlord win lose fen
         cur_score undone restore
         d0 d1 d2 d3 d4 d5 d6 d7 d8 d9 d10 d100 neg
-        view_log clear_log log_exit)
+        view_log clear_log log_exit unclear)
     target_add_binary_data(${COMPONENT_LIB} "${VOICE_ASSET_DIR}/${wav}.wav" BINARY)
 endforeach()

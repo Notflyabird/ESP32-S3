@@ -44,6 +44,7 @@ ASSETS = {
     "view_log.wav":      "进入日志查看",
     "clear_log.wav":     "计分日志已清空",
     "log_exit.wav":      "返回主页",
+    "unclear.wav":       "没听清请再说一次",
     # ===== 玩家 =====
     "p1.wav": "一号",
     "p2.wav": "二号",
