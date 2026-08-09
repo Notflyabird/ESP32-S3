@@ -32,6 +32,10 @@ typedef enum {
     VOICE_ASSET_CUR_SCORE,
     VOICE_ASSET_UNDONE,
     VOICE_ASSET_RESTORE,
+    /* 日志相关 */
+    VOICE_ASSET_VIEW_LOG,
+    VOICE_ASSET_CLEAR_LOG,
+    VOICE_ASSET_LOG_EXIT,
     /* 数字（运行时拼接中文读数）*/
     VOICE_ASSET_D0,
     VOICE_ASSET_D1,

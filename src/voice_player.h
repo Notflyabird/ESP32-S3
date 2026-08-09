@@ -39,6 +39,9 @@ void voice_speak_query(int s1, int s2, int s3);                             /* �
 void voice_speak_undo_result(bool was_reset, uint8_t op_player,
                              bool op_landlord_win, int op_points,
                              int s1, int s2, int s3);                       /* 已撤销... */
+void voice_speak_view_log(void);                                            /* 进入日志查看 */
+void voice_speak_clear_log(void);                                           /* 计分日志已清空 */
+void voice_speak_log_exit(void);                                            /* 返回主页 */
 
 #ifdef __cplusplus
 }

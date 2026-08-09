@@ -27,7 +27,10 @@ extern const uint8_t _binary_lose_wav_start[],         _binary_lose_wav_end[];
 extern const uint8_t _binary_fen_wav_start[],          _binary_fen_wav_end[];
 extern const uint8_t _binary_cur_score_wav_start[],    _binary_cur_score_wav_end[];
 extern const uint8_t _binary_undone_wav_start[],       _binary_undone_wav_end[];
-extern const uint8_t _binary_restore_wav_start[],      _binary_restore_wav_end[];
+extern const uint8_t _binary_restore_wav_start[],   _binary_restore_wav_end[];
+extern const uint8_t _binary_view_log_wav_start[],  _binary_view_log_wav_end[];
+extern const uint8_t _binary_clear_log_wav_start[], _binary_clear_log_wav_end[];
+extern const uint8_t _binary_log_exit_wav_start[],  _binary_log_exit_wav_end[];
 extern const uint8_t _binary_d0_wav_start[],           _binary_d0_wav_end[];
 extern const uint8_t _binary_d1_wav_start[],           _binary_d1_wav_end[];
 extern const uint8_t _binary_d2_wav_start[],           _binary_d2_wav_end[];
@@ -64,6 +67,9 @@ static const asset_entry_t s_assets[VOICE_ASSET_COUNT] = {
     [VOICE_ASSET_CUR_SCORE]    = { _binary_cur_score_wav_start,    _binary_cur_score_wav_end,    "cur_score" },
     [VOICE_ASSET_UNDONE]       = { _binary_undone_wav_start,       _binary_undone_wav_end,       "undone" },
     [VOICE_ASSET_RESTORE]      = { _binary_restore_wav_start,      _binary_restore_wav_end,      "restore" },
+    [VOICE_ASSET_VIEW_LOG]     = { _binary_view_log_wav_start,     _binary_view_log_wav_end,     "view_log" },
+    [VOICE_ASSET_CLEAR_LOG]    = { _binary_clear_log_wav_start,    _binary_clear_log_wav_end,    "clear_log" },
+    [VOICE_ASSET_LOG_EXIT]     = { _binary_log_exit_wav_start,     _binary_log_exit_wav_end,     "log_exit" },
     [VOICE_ASSET_D0]           = { _binary_d0_wav_start,           _binary_d0_wav_end,           "d0" },
     [VOICE_ASSET_D1]           = { _binary_d1_wav_start,           _binary_d1_wav_end,           "d1" },
     [VOICE_ASSET_D2]           = { _binary_d2_wav_start,           _binary_d2_wav_end,           "d2" },

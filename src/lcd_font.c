@@ -1,5 +1,6 @@
 #include "lcd_font.h"
 #include <stddef.h>
+#include "lcd_font_cn_data.h"   /* 生成的中文字库数据（55 字，16x16）*/
 
 /* ===================================================================
  *  ASCII 8×16 font (glyphs 0x20‑0x7E)
@@ -302,6 +303,30 @@ const uint8_t *lcd_font_get_glyph(char ch, uint8_t *out_width)
     if (ch >= 0x20 && ch <= 0x7E) {
         if (out_width) *out_width = LCD_FONT_ASC_W;
         return &ascii_8x16[((unsigned char)ch - 0x20) * 16];
+    }
+    if (out_width) *out_width = 0;
+    return NULL;
+}
+
+/* ===================================================================
+ *  Chinese 16×16 font — binary search on sorted codepoint table
+ * =================================================================== */
+const uint8_t *lcd_font_get_glyph_cn(uint32_t unicode, uint8_t *out_width)
+{
+    int lo = 0;
+    int hi = CN_FONT_COUNT - 1;
+    while (lo <= hi) {
+        int mid = lo + (hi - lo) / 2;
+        uint16_t cp = cn_codepoints[mid];
+        if (cp == unicode) {
+            if (out_width) *out_width = LCD_FONT_CN_W;
+            return cn_bitmaps[mid];
+        }
+        if (cp < unicode) {
+            lo = mid + 1;
+        } else {
+            hi = mid - 1;
+        }
     }
     if (out_width) *out_width = 0;
     return NULL;

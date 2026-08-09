@@ -41,6 +41,9 @@ ASSETS = {
     "score_reset.wav":   "分数已重置",
     "nothing_undo.wav":  "没有可撤销的计分",
     "undo_timeout.wav":  "撤销时间已超过十秒",
+    "view_log.wav":      "进入日志查看",
+    "clear_log.wav":     "计分日志已清空",
+    "log_exit.wav":      "返回主页",
     # ===== 玩家 =====
     "p1.wav": "一号",
     "p2.wav": "二号",

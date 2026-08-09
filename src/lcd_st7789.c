@@ -362,29 +362,56 @@ static void draw_glyph(uint16_t x, uint16_t y,
 {
     if (!bitmap || w == 0) return;
 
-    uint8_t line_buf[16];  /* 8 px × 2 bytes = 16 bytes */
+    uint8_t line_buf[32];           /* 最多 16 px × 2 bytes = 32 bytes */
+    uint8_t bytes_per_row = w / 8;  /* ASCII=1, 中文=2 */
 
     for (uint8_t row = 0; row < LCD_FONT_H; row++) {
-        uint8_t byte_val = bitmap[row];
         uint8_t *dst = line_buf;
-
         for (uint8_t col = 0; col < w; col++) {
-            bool on = (byte_val >> (7 - col)) & 1;
+            uint8_t byte_idx = col / 8;
+            uint8_t bit_idx  = col % 8;
+            bool on = (bitmap[row * bytes_per_row + byte_idx] >> (7 - bit_idx)) & 1;
             uint16_t c = on ? fg : bg;
             *dst++ = c >> 8;
             *dst++ = c & 0xFF;
         }
-
-        if (w > 0) {
-            lcd_set_window(x, y + row, x + w - 1, y + row);
-            spi_transaction_t t = {
-                .length = w * 2 * 8,
-                .tx_buffer = line_buf,
-                .user = (void *)1,    /* DC high */
-            };
-            ESP_ERROR_CHECK(spi_device_polling_transmit(s_spi_dev, &t));
-        }
+        lcd_set_window(x, y + row, x + w - 1, y + row);
+        spi_transaction_t t = {
+            .length = w * 2 * 8,
+            .tx_buffer = line_buf,
+            .user = (void *)1,    /* DC high */
+        };
+        ESP_ERROR_CHECK(spi_device_polling_transmit(s_spi_dev, &t));
     }
+}
+
+/* ------------------------------------------------------------------
+ *  UTF-8 decode helper — returns Unicode codepoint, sets *consumed.
+ *  Invalid sequence returns 0xFFFFFFFF and consumes 1 byte.
+ * ------------------------------------------------------------------ */
+static uint32_t utf8_decode(const char *p, int *consumed)
+{
+    uint8_t c = (uint8_t)*p;
+    if (c < 0x80) {
+        *consumed = 1;
+        return c;
+    }
+    uint32_t unicode = 0;
+    int len = 0;
+    if ((c & 0xE0) == 0xC0)      { len = 2; unicode = c & 0x1F; }
+    else if ((c & 0xF0) == 0xE0) { len = 3; unicode = c & 0x0F; }
+    else if ((c & 0xF8) == 0xF0) { len = 4; unicode = c & 0x07; }
+    else { *consumed = 1; return 0xFFFFFFFF; }
+
+    for (int i = 1; i < len; i++) {
+        if (((uint8_t)p[i] & 0xC0) != 0x80) {
+            *consumed = 1;
+            return 0xFFFFFFFF;
+        }
+        unicode = (unicode << 6) | ((uint8_t)p[i] & 0x3F);
+    }
+    *consumed = len;
+    return unicode;
 }
 
 void lcd_st7789_draw_string(uint16_t x, uint16_t y, const char *str,
@@ -393,13 +420,24 @@ void lcd_st7789_draw_string(uint16_t x, uint16_t y, const char *str,
     if (!s_initialized || !str) return;
 
     uint16_t cur_x = x;
-    for (const char *p = str; *p; p++) {
+    const char *p = str;
+    while (*p) {
+        int consumed = 0;
+        uint32_t cp = utf8_decode(p, &consumed);
         uint8_t gw = 0;
-        const uint8_t *glyph = lcd_font_get_glyph(*p, &gw);
+        const uint8_t *glyph = NULL;
+
+        if (cp < 0x80) {
+            glyph = lcd_font_get_glyph((char)cp, &gw);
+        } else if (cp != 0xFFFFFFFF) {
+            glyph = lcd_font_get_glyph_cn(cp, &gw);
+        }
+
         if (glyph && gw > 0) {
             draw_glyph(cur_x, y, glyph, gw, fg_color, bg_color);
             cur_x += gw;
         }
+        p += consumed;
     }
 }
 
@@ -407,10 +445,18 @@ uint16_t lcd_st7789_string_width(const char *str)
 {
     if (!str) return 0;
     uint16_t w = 0;
-    for (const char *p = str; *p; p++) {
+    const char *p = str;
+    while (*p) {
+        int consumed = 0;
+        uint32_t cp = utf8_decode(p, &consumed);
         uint8_t gw = 0;
-        lcd_font_get_glyph(*p, &gw);
+        if (cp < 0x80) {
+            lcd_font_get_glyph((char)cp, &gw);
+        } else if (cp != 0xFFFFFFFF) {
+            lcd_font_get_glyph_cn(cp, &gw);
+        }
         w += gw;
+        p += consumed;
     }
     return w;
 }

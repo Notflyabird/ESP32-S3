@@ -12,8 +12,9 @@ idf_component_register(
         "voice_player.c"
         "voice_assets.c"
         "undo_button.c"
+        "score_log.c"
     INCLUDE_DIRS "."
-    PRIV_REQUIRES driver esp_driver_i2s esp_driver_spi esp_timer esp-sr
+    PRIV_REQUIRES driver esp_driver_i2s esp_driver_spi esp_timer esp-sr nvs_flash
 )
 
 # ===== 嵌入预生成语音素材（edge-tts 神经网络 TTS，16kHz mono 16bit WAV）=====
@@ -24,6 +25,7 @@ foreach(wav
         p1 p2 p3
         landlord win lose fen
         cur_score undone restore
-        d0 d1 d2 d3 d4 d5 d6 d7 d8 d9 d10 d100 neg)
+        d0 d1 d2 d3 d4 d5 d6 d7 d8 d9 d10 d100 neg
+        view_log clear_log log_exit)
     target_add_binary_data(${COMPONENT_LIB} "${VOICE_ASSET_DIR}/${wav}.wav" BINARY)
 endforeach()

@@ -238,7 +238,7 @@ static void detect_task(void *arg)
             command_session = false;
             int s1, s2, s3, landlord;
             scorekeeper_get_scores(&s1, &s2, &s3, &landlord);
-            lcd_ui_update((uint8_t)landlord, s1, s2, s3, "Ready - NiHaoXiaoXin");
+            lcd_ui_update((uint8_t)landlord, s1, s2, s3, "就绪 你好小鑫");
         }
     }
 }

@@ -34,6 +34,9 @@ typedef enum {
     VOICE_JOB_SCORE_UPDATE,
     VOICE_JOB_QUERY,
     VOICE_JOB_UNDO_RESULT,
+    VOICE_JOB_VIEW_LOG,
+    VOICE_JOB_CLEAR_LOG,
+    VOICE_JOB_LOG_EXIT,
 } voice_job_type_t;
 
 typedef struct {
@@ -148,6 +151,15 @@ static void voice_task(void *arg)
             build_undo_result(ids, &n, job.was_reset, job.op_player,
                               job.op_landlord_win, job.op_points,
                               job.s1, job.s2, job.s3);
+            break;
+        case VOICE_JOB_VIEW_LOG:
+            ids[n++] = VOICE_ASSET_VIEW_LOG;
+            break;
+        case VOICE_JOB_CLEAR_LOG:
+            ids[n++] = VOICE_ASSET_CLEAR_LOG;
+            break;
+        case VOICE_JOB_LOG_EXIT:
+            ids[n++] = VOICE_ASSET_LOG_EXIT;
             break;
         }
 
@@ -275,5 +287,23 @@ void voice_speak_undo_result(bool was_reset, uint8_t op_player,
         .op_points = op_points,
         .s1 = s1, .s2 = s2, .s3 = s3,
     };
+    enqueue(&j);
+}
+
+void voice_speak_view_log(void)
+{
+    voice_job_t j = { .type = VOICE_JOB_VIEW_LOG };
+    enqueue(&j);
+}
+
+void voice_speak_clear_log(void)
+{
+    voice_job_t j = { .type = VOICE_JOB_CLEAR_LOG };
+    enqueue(&j);
+}
+
+void voice_speak_log_exit(void)
+{
+    voice_job_t j = { .type = VOICE_JOB_LOG_EXIT };
     enqueue(&j);
 }

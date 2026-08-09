@@ -11,12 +11,15 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "lcd_ui.h"
+#include "score_log.h"
 #include "voice_player.h"
 
 static const char *TAG = "DDZ_SCORE";
 
 #define CMD_QUERY_SCORE 1
 #define CMD_RESET_SCORE 2
+#define CMD_VIEW_LOG    3
+#define CMD_CLEAR_LOG   4
 #define CMD_SCORE_BASE 100
 
 /* 撤销窗口：10 秒内有效 */
@@ -87,6 +90,22 @@ void scorekeeper_get_scores(int *s1, int *s2, int *s3, int *landlord)
     }
 }
 
+void scorekeeper_restore_state(int scores[3], int landlord)
+{
+    if (s_score_lock == NULL) {
+        s_score_lock = xSemaphoreCreateMutex();
+    }
+    xSemaphoreTake(s_score_lock, portMAX_DELAY);
+    s_score[0] = scores[0];
+    s_score[1] = scores[1];
+    s_score[2] = scores[2];
+    s_landlord = landlord;
+    /* 跨重启不可撤销：避免开机后误按 GPIO0 撤销恢复的分数 */
+    s_last_op.valid = false;
+    xSemaphoreGive(s_score_lock);
+    scorekeeper_print_scores("Restored");
+}
+
 static void reset_scores(void)
 {
     s_score[0] = 0;
@@ -124,6 +143,17 @@ static void undo_snapshot_commit(const int64_t *scores_before, int landlord_befo
     s_last_op.op_player       = op_player;
     s_last_op.op_landlord_win = op_landlord_win;
     s_last_op.op_points       = op_points;
+
+    /* 追加持久化日志 + 同步当前分数（仍持 s_score_lock；score_log 内部取 s_log_lock）*/
+    uint16_t rnd = score_log_next_round_no();
+    if (was_reset) {
+        score_log_append_reset(rnd, s_score[0], s_score[1], s_score[2]);
+    } else {
+        score_log_append_round(rnd, (uint8_t)op_player, (uint8_t)s_landlord,
+                               op_landlord_win, (uint8_t)op_points,
+                               s_score[0], s_score[1], s_score[2]);
+    }
+    score_log_persist_scores_locked(s_score[0], s_score[1], s_score[2], s_landlord);
 
     xSemaphoreGive(s_score_lock);
 }
@@ -197,6 +227,11 @@ static void speak_reset(void)
 
 void scorekeeper_apply_command(int command)
 {
+    /* 日志页期间收到任何非"查看日志"命令：先退出日志页回主页再处理 */
+    if (command != CMD_VIEW_LOG && score_log_view_is_active()) {
+        score_log_view_exit();
+    }
+
     int player = 0;
     int points = 0;
     bool landlord_win = false;
@@ -212,7 +247,7 @@ void scorekeeper_apply_command(int command)
                              player, landlord_win, points);
 
         speak_score_update(player, landlord_win, points);
-        lcd_ui_update((uint8_t)player, s_score[0], s_score[1], s_score[2], "Score updated");
+        lcd_ui_update((uint8_t)player, s_score[0], s_score[1], s_score[2], "计分已更新");
         return;
     }
 
@@ -220,7 +255,7 @@ void scorekeeper_apply_command(int command)
     case CMD_QUERY_SCORE:
         scorekeeper_print_scores("Query");
         speak_query_score();
-        lcd_ui_update((uint8_t)s_landlord, s_score[0], s_score[1], s_score[2], "Querying...");
+        lcd_ui_update((uint8_t)s_landlord, s_score[0], s_score[1], s_score[2], "查询中...");
         break;
     case CMD_RESET_SCORE: {
         int64_t before[3];
@@ -231,7 +266,25 @@ void scorekeeper_apply_command(int command)
         undo_snapshot_commit(before, before_landlord, true, 0, false, 0);
 
         speak_reset();
-        lcd_ui_update(0, s_score[0], s_score[1], s_score[2], "Reset complete");
+        lcd_ui_update(0, s_score[0], s_score[1], s_score[2], "重置完成");
+        break;
+    }
+    case CMD_VIEW_LOG:
+        /* 进入日志页（若已在则重置到第 1 页重绘）*/
+        score_log_view_enter();
+        voice_speak_view_log();
+        break;
+    case CMD_CLEAR_LOG: {
+        /* 清空全部历史日志 + 当前分数归零（全新开始）*/
+        int64_t before[3];
+        int before_landlord;
+        undo_snapshot_begin(before, &before_landlord);
+        reset_scores();
+        score_log_clear_all();
+        s_last_op.valid = false;
+        undo_snapshot_abort();
+        lcd_ui_update(0, 0, 0, 0, "全部已清空");
+        voice_speak_clear_log();
         break;
     }
     default:
@@ -280,6 +333,9 @@ bool scorekeeper_undo_last(void)
     int  op_points       = s_last_op.op_points;
     int  s1 = s_score[0], s2 = s_score[1], s3 = s_score[2];
     uint8_t landlord_disp = (uint8_t)(s_landlord > 0 ? s_landlord : 0);
+
+    /* 同步撤销后分数到 NVS（撤销不进日志条目，仅同步当前分数）*/
+    score_log_persist_scores_locked(s1, s2, s3, s_landlord);
 
     xSemaphoreGive(s_score_lock);
 
@@ -332,5 +388,9 @@ bool scorekeeper_register_commands(void)
            add_command_checked(esp_mn_commands_add(CMD_QUERY_SCORE, "cha xun fen shu"),
                                CMD_QUERY_SCORE, "cha xun fen shu") &&
            add_command_checked(esp_mn_commands_add(CMD_RESET_SCORE, "chong zhi suo you fen shu"),
-                               CMD_RESET_SCORE, "chong zhi suo you fen shu");
+                               CMD_RESET_SCORE, "chong zhi suo you fen shu") &&
+           add_command_checked(esp_mn_commands_add(CMD_VIEW_LOG, "cha kan ji fen ri zhi"),
+                               CMD_VIEW_LOG, "cha kan ji fen ri zhi") &&
+           add_command_checked(esp_mn_commands_add(CMD_CLEAR_LOG, "qing chu ji fen ri zhi"),
+                               CMD_CLEAR_LOG, "qing chu ji fen ri zhi");
 }
