@@ -5,6 +5,7 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "lcd_backlight.h"
 #include "lcd_st7789.h"
 #include "lcd_ui.h"
 #include "nvs_flash.h"
@@ -46,6 +47,11 @@ void app_main(void)
         .spi_freq_hz = LCD_SPI_FREQ_HZ,
     };
     ESP_ERROR_CHECK(lcd_st7789_init(&lcd_cfg));
+
+    /* ---------- Backlight timeout management (GPIO7 BLK) ---------- */
+    if (!lcd_backlight_init((int)LCD_PIN_BL)) {
+        ESP_LOGE(TAG, "lcd_backlight_init failed — continue without BL control");
+    }
 
     lcd_ui_init_page();
     {

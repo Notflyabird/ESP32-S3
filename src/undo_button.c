@@ -8,6 +8,7 @@
 #include "freertos/task.h"
 #include "freertos/queue.h"
 
+#include "lcd_backlight.h"
 #include "scorekeeper.h"
 #include "score_log.h"
 #include "voice_player.h"
@@ -105,6 +106,7 @@ static void undo_button_task(void *arg)
             if (press_in_progress && (now - press_start_ms) >= LONG_PRESS_MS) {
                 ESP_LOGI(TAG, "Long-press detected (%lld ms) -> exit log view",
                          (long long)(now - press_start_ms));
+                lcd_backlight_activity();
                 score_log_view_exit();
                 voice_speak_log_exit();
                 press_in_progress = false;
@@ -120,6 +122,7 @@ static void undo_button_task(void *arg)
             if (!in_log_view) {
                 /* 主页：按下立即撤销（保持原有 10s 窗口语义由 scorekeeper 内部判定）*/
                 ESP_LOGI(TAG, "Undo button pressed (GPIO%d low)", UNDO_GPIO);
+                lcd_backlight_activity();
                 scorekeeper_undo_last();
             } else {
                 /* 日志页：记录按下时刻，等释放时按持续时长分流 */
@@ -138,10 +141,12 @@ static void undo_button_task(void *arg)
                 } else if (duration >= LONG_PRESS_MS) {
                     ESP_LOGI(TAG, "Long-press release (%lld ms) -> exit log view",
                              (long long)duration);
+                    lcd_backlight_activity();
                     score_log_view_exit();
                     voice_speak_log_exit();
                 } else {
                     ESP_LOGI(TAG, "Short-press (%lld ms) -> next page", (long long)duration);
+                    lcd_backlight_activity();
                     score_log_view_next_page();
                 }
             }

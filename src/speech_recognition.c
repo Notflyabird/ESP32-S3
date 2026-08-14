@@ -13,6 +13,7 @@
 #include "esp_mn_speech_commands.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "lcd_backlight.h"
 #include "lcd_ui.h"
 #include "model_path.h"
 #include "scorekeeper.h"
@@ -233,6 +234,7 @@ static void detect_task(void *arg)
 
         if (result->wakeup_state == WAKENET_DETECTED) {
             ESP_LOGI(TAG, "Wake word detected! Listening for command...");
+            lcd_backlight_activity();
             int s1, s2, s3, landlord;
             scorekeeper_get_scores(&s1, &s2, &s3, &landlord);
             lcd_ui_update((uint8_t)landlord, s1, s2, s3, "我在听...");
@@ -253,13 +255,15 @@ static void detect_task(void *arg)
                                      &timed_out, &rejected);
         if (command >= 0) {
             /* 合法命令：重置计数，执行计分 */
+            lcd_backlight_activity();
             low_prob_count = 0;
             scorekeeper_apply_command(command);
             speech->chinese.iface->clean(speech->chinese.data);
             speech->afe_iface->enable_wakenet(speech->afe_data);
             command_session = false;
         } else if (rejected) {
-            /* 低概率被过滤：连续多次后提示"没听清" */
+            /* 低概率被过滤：用户说了但不可靠，也算一次活动；连续多次后提示"没听清" */
+            lcd_backlight_activity();
             low_prob_count++;
             if (low_prob_count >= LOW_PROB_HINT_LIMIT) {
                 ESP_LOGI(TAG, "Low prob x%d -> speak unclear hint", low_prob_count);

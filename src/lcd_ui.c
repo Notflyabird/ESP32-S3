@@ -5,6 +5,7 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "lcd_backlight.h"
 #include "lcd_st7789.h"
 
 /* ======================== Colour constants ======================== */
@@ -141,6 +142,7 @@ void lcd_ui_update(uint8_t landlord_no,
                    int s1, int s2, int s3,
                    const char *status)
 {
+    lcd_backlight_activity();
     lcd_lock();
     char buf[32];
 
@@ -168,6 +170,7 @@ void lcd_ui_update(uint8_t landlord_no,
 void lcd_ui_log_draw_page(uint8_t page_idx, uint8_t num_pages,
                           const score_log_entry_t *entries, uint8_t count)
 {
+    lcd_backlight_activity();
     lcd_lock();
     lcd_st7789_fill_screen(BLACK);
 

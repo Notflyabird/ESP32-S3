@@ -29,6 +29,9 @@
 #define LCD_HEIGHT        320
 #define LCD_SPI_FREQ_HZ   (40 * 1000 * 1000)  /* 40 MHz */
 
+/* ====================== LCD 背光超时节能 ======================== */
+#define LCD_BL_TIMEOUT_MS  20000   /* 20s 无用户活动自动关背光 */
+
 /* ====================== MAX98357A I2S1 Speaker ================ */
 #define SPEAKER_I2S_PORT      I2S_NUM_1
 #define SPEAKER_PIN_BCLK      GPIO_NUM_15
