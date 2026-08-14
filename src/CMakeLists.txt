@@ -1,7 +1,8 @@
 idf_component_register(
     SRCS
-        "main.c"
-        "audio_input.c"
+          "main.c"
+          "audio_input.c"
+          "pm_profile.c"
         "audio_dsp.c"
         "audio_player.c"
         "lcd_backlight.c"

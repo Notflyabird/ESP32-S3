@@ -7,6 +7,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
+#include "pm_profile.h"
 #include "voice_assets.h"
 
 static const char *TAG = "VOICE_PLAYER";
@@ -117,6 +118,9 @@ static void voice_task(void *arg)
     while (xQueueReceive(s_queue, &job, portMAX_DELAY) == pdTRUE) {
         s_playing = true;
 
+        /* L3: TTS 播报 / DSP 处理阶段拉满 240 MHz，避免频率切换带来 audio 抖动 */
+        pm_profile_high_perf_acquire();
+
         /* 暂停 SR 麦克风采集，避免回授误识别 */
         g_sr_paused = true;
         vTaskDelay(pdMS_TO_TICKS(50));
@@ -175,6 +179,9 @@ static void voice_task(void *arg)
 
         g_sr_paused = false;
         s_playing = false;
+
+        /* L3: 播报结束释放 240 MHz 锁，DFS 可降频 */
+        pm_profile_high_perf_release();
     }
 }
 

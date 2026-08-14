@@ -9,6 +9,7 @@
 #include "lcd_st7789.h"
 #include "lcd_ui.h"
 #include "nvs_flash.h"
+#include "pm_profile.h"
 #include "score_log.h"
 #include "scorekeeper.h"
 #include "speech_recognition.h"
@@ -27,6 +28,10 @@ void app_main(void)
     } else {
         ESP_ERROR_CHECK(nvs_err);
     }
+
+    /* ---------- L2/L3 低功耗画像：PM 锁初始化 (Tickless + DFS) ----------
+     * 需要在任何会调用 _acquire() 的任务启动之前完成初始化。*/
+    pm_profile_init();
 
     /* ---------- Score log init: restore scores + history from NVS ----------
      * 必须在 LCD / scorekeeper / undo_button 之前调用：

@@ -15,6 +15,7 @@
 #include "freertos/task.h"
 #include "lcd_backlight.h"
 #include "lcd_ui.h"
+#include "pm_profile.h"
 #include "model_path.h"
 #include "scorekeeper.h"
 #include "voice_player.h"
@@ -235,6 +236,7 @@ static void detect_task(void *arg)
         if (result->wakeup_state == WAKENET_DETECTED) {
             ESP_LOGI(TAG, "Wake word detected! Listening for command...");
             lcd_backlight_activity();
+            pm_profile_high_perf_acquire();   /* L3: 语音会话期拉 240 MHz，确保 SR 流畅 */
             int s1, s2, s3, landlord;
             scorekeeper_get_scores(&s1, &s2, &s3, &landlord);
             lcd_ui_update((uint8_t)landlord, s1, s2, s3, "我在听...");
@@ -254,15 +256,17 @@ static void detect_task(void *arg)
         int command = detect_command(&speech->chinese, result->data,
                                      &timed_out, &rejected);
         if (command >= 0) {
-            /* 合法命令：重置计数，执行计分 */
+            /* 合法命令：重置计数，执行计分，会话结束 */
             lcd_backlight_activity();
             low_prob_count = 0;
             scorekeeper_apply_command(command);
             speech->chinese.iface->clean(speech->chinese.data);
             speech->afe_iface->enable_wakenet(speech->afe_data);
             command_session = false;
+            pm_profile_high_perf_release();   /* L3: 会话结束，释放 240 MHz 锁 */
         } else if (rejected) {
-            /* 低概率被过滤：用户说了但不可靠，也算一次活动；连续多次后提示"没听清" */
+            /* 低概率被过滤：用户说了但不可靠，也算一次活动；连续多次后提示"没听清"。
+             * command_session 保持 true，所以仍然需要高算力（用户可能继续说）。*/
             lcd_backlight_activity();
             low_prob_count++;
             if (low_prob_count >= LOW_PROB_HINT_LIMIT) {
@@ -274,6 +278,7 @@ static void detect_task(void *arg)
         } else if (timed_out) {
             speech->afe_iface->enable_wakenet(speech->afe_data);
             command_session = false;
+            pm_profile_high_perf_release();   /* L3: 会话超时，释放 240 MHz 锁 */
             int s1, s2, s3, landlord;
             scorekeeper_get_scores(&s1, &s2, &s3, &landlord);
             lcd_ui_update((uint8_t)landlord, s1, s2, s3, "就绪 你好小鑫");
