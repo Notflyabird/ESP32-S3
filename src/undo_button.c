@@ -9,6 +9,7 @@
 #include "freertos/queue.h"
 
 #include "lcd_backlight.h"
+#include "pm_sleep_mgr.h"    /* L6-A: 查询是否正在进入 Light-Sleep（GPIO0 只唤醒不做事）*/
 #include "scorekeeper.h"
 #include "score_log.h"
 #include "voice_player.h"
@@ -131,12 +132,22 @@ static void undo_button_task(void *arg)
         }
 
         /* ============================================================
-         * k1：背光灭时，按键的唯一作用是点亮屏幕。
-         *     本次 press + 对应的 release 都要"吞掉"，不做撤销/翻页/语音。
+         * k1 + L6-A：按键的唯一作用是"唤醒"时，整对 press+release 吞掉。
+         *   情况 A (k1)：背光灭 → 只点亮屏幕
+         *   情况 B (L6-A)：pm_sleep_mgr_is_preparing_sleep() == true
+         *       → Light-Sleep 前的准备序列正在跑 / 刚唤醒还在收尾，
+         *         GPIO0 这次按下只是 EXT0 唤醒的副作用（或用户"唤醒一下"），
+         *         不触发撤销/翻页/语音，避免"刚醒就播一句"。
          * ============================================================ */
-        if (evt.pressed && !lcd_backlight_is_on()) {
-            ESP_LOGI(TAG, "Backlight OFF: GPIO%d press -> wake screen only (no action)",
-                     UNDO_GPIO);
+        bool just_wake_ls = pm_sleep_mgr_is_preparing_sleep();
+        if (evt.pressed && (!lcd_backlight_is_on() || just_wake_ls)) {
+            if (just_wake_ls) {
+                ESP_LOGI(TAG, "L6-A Light-Sleep: GPIO%d press -> wake only (no action/voice)",
+                         UNDO_GPIO);
+            } else {
+                ESP_LOGI(TAG, "Backlight OFF: GPIO%d press -> wake screen only (no action)",
+                         UNDO_GPIO);
+            }
             lcd_backlight_activity();
             swallow_pair = true;      /* 对应的 release 也要吞掉 */
             press_in_progress = false;

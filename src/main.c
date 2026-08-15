@@ -10,6 +10,7 @@
 #include "lcd_ui.h"
 #include "nvs_flash.h"
 #include "pm_profile.h"
+#include "pm_sleep_mgr.h"   /* L6-A: 5min 无活动 → Light-Sleep */
 #include "score_log.h"
 #include "scorekeeper.h"
 #include "speech_recognition.h"
@@ -106,4 +107,9 @@ void app_main(void)
     if (!speech_recognition_start()) {
         ESP_LOGE(TAG, "Failed to create speech tasks");
     }
+
+    /* ---------- L6-A Light-Sleep 睡眠管理器（5 分钟无活动自动睡眠）
+     * 必须在 backlight / speech / undo_button 之后启动，
+     * 因为它内部会调这些模块的 suspend/resume API。*/
+    pm_sleep_mgr_init();
 }

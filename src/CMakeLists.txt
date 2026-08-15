@@ -3,6 +3,7 @@ idf_component_register(
           "main.c"
           "audio_input.c"
           "pm_profile.c"
+          "pm_sleep_mgr.c"
         "audio_dsp.c"
         "audio_player.c"
         "lcd_backlight.c"
@@ -16,7 +17,7 @@ idf_component_register(
         "undo_button.c"
         "score_log.c"
     INCLUDE_DIRS "."
-    PRIV_REQUIRES driver esp_driver_i2s esp_driver_spi esp_timer esp-sr nvs_flash
+    PRIV_REQUIRES driver esp_driver_i2s esp_driver_spi esp_timer esp-sr nvs_flash esp_pm
 )
 
 # ===== 嵌入预生成语音素材（edge-tts 神经网络 TTS，16kHz mono 16bit WAV）=====

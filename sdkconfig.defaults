@@ -36,3 +36,12 @@ CONFIG_PM_DFS_INIT_AUTO=y
 # 默认 CPU 频率 160 MHz：空闲时 DFS 自动降到 40MHz；重负载由 PM Lock 拉到 240 MHz
 CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_160=y
 CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ=160
+
+# =================  L6-A: Light-Sleep 支持  =================
+# 注：esp_light_sleep_start() API 在 CONFIG_PM_ENABLE=y 时即默认可用（ESP-IDF 内置），
+#     GPIO RTC 唤醒源 (gpio_wakeup_enable + esp_sleep_enable_ext0_wakeup) 同样默认启用。
+#     不再手动设置 ESP_SLEEP_* / PM_* 系列 workaround 项——它们中的一部分在
+#     v5.3.5 的 bootloader 精简 Kconfig 中不存在，会导致 bootloader 子工程
+#     CMake configure 失败 → ninja subcommand failed。默认值已满足：
+#     PSRAM 睡眠默认保持自刷新（AFE/素材安全），RTC 内存默认不掉电（安全）。
+#     如需微调，改主工程 sdkconfig（menuconfig），不要写 sdkconfig.defaults。

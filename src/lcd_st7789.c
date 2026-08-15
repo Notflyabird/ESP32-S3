@@ -8,8 +8,10 @@
 #include "esp_check.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "lcd_font.h"
+#include "rom/ets_sys.h"   /* ets_delay_us: busy wait, 不让出 CPU（L5 sleep_in/out 持锁期间用）*/
 
 static const char *TAG = "LCD_ST7789";
 
@@ -19,6 +21,14 @@ static const char *TAG = "LCD_ST7789";
 static spi_device_handle_t s_spi_dev = NULL;
 static lcd_st7789_config_t s_cfg = {0};
 static bool s_initialized = false;
+static volatile bool s_sleeping = false;    /* L5: ST7789 Sleep 状态跟踪 */
+/* 递归互斥锁：保护 SPI 操作序列，防止 bl_task 和 sr_detect 并发访问 SPI 崩溃。
+ * 递归锁：lcd_wake_if_sleeping() 调 sleep_out()，而 sleep_out 在 fill_rect 持锁期间被调，
+ * 递归锁允许同任务多次获取不死锁。*/
+static SemaphoreHandle_t s_lcd_lock = NULL;
+
+static inline void lcd_lock(void)   { xSemaphoreTakeRecursive(s_lcd_lock, portMAX_DELAY); }
+static inline void lcd_unlock(void) { xSemaphoreGiveRecursive(s_lcd_lock); }
 
 /* ================================================================== */
 /*  Pre‑transaction callback: set DC pin according to `user` field     */
@@ -219,6 +229,13 @@ esp_err_t lcd_st7789_init(const lcd_st7789_config_t *cfg)
 
     s_cfg = *cfg;
 
+    /* 创建递归互斥锁（在第一次 SPI 操作之前）*/
+    s_lcd_lock = xSemaphoreCreateRecursiveMutex();
+    if (s_lcd_lock == NULL) {
+        ESP_LOGE(TAG, "Failed to create LCD lock");
+        return ESP_ERR_NO_MEM;
+    }
+
     /* --- GPIO: DC only (CS is managed by SPI driver) --- */
     gpio_config_t io_conf = {
         .pin_bit_mask = (1ULL << s_cfg.dc_io),
@@ -291,16 +308,69 @@ esp_err_t lcd_st7789_init(const lcd_st7789_config_t *cfg)
     return ESP_OK;
 }
 
+/* ==================================================================
+ * L5: Sleep / Wake-up ST7789 驱动振荡器与扫描
+ * ================================================================== */
+void lcd_st7789_sleep_in(void)
+{
+    if (!s_initialized) return;
+    lcd_lock();
+    if (s_sleeping) { lcd_unlock(); return; }  /* 防重复调用 */
+    /* ⚠️ 先设 s_sleeping=true 再发 SPI 命令：
+     * 防止 delay 期间 sr_detect 误唤醒 → lcd_ui_update → 并发访问 SPI 崩溃。*/
+    s_sleeping = true;
+    ESP_LOGI(TAG, "[SENTRY-BEGIN] L5: ST7789 SLEEP_IN (0x10) — send cmd");
+    lcd_write_cmd(0x10);  /* SLPIN */
+    /* ST7789 数据表 t(SLPIN) = 5ms。用 ets_delay_us（busy wait）而非 vTaskDelay：
+     * 持锁期间不让出 CPU，避免高优先级任务抢锁后并发访问 SPI。*/
+    ets_delay_us(5000);
+    lcd_unlock();
+    ESP_LOGI(TAG, "[SENTRY-OK] L5: ST7789 SLEEP_IN done");
+}
+
+void lcd_st7789_sleep_out(void)
+{
+    if (!s_initialized) return;
+    lcd_lock();
+    if (!s_sleeping) { lcd_unlock(); return; }
+    ESP_LOGI(TAG, "[SENTRY-BEGIN] L5: ST7789 SLEEP_OUT (0x11) — send cmd + busy 120ms");
+    lcd_write_cmd(0x11);  /* SLPOUT */
+    /* ST7789 数据表 t(SLPOUT) ≥ 120ms。用 ets_delay_us（busy wait）而非 vTaskDelay：
+     * 持锁期间不让出 CPU，确保 120ms 内没有其他任务访问 SPI。*/
+    ets_delay_us(120000);
+    s_sleeping = false;
+    lcd_unlock();
+    ESP_LOGI(TAG, "[SENTRY-OK] L5: ST7789 SLEEP_OUT done");
+}
+
+bool lcd_st7789_is_sleeping(void) { return s_sleeping; }
+
+/* ==================================================================
+ * L5: 所有 draw/fill 入口加检查：如处于 Sleep 先自动唤醒再绘制。
+ *     避免 lcd_ui_update() 在 sleep 期间画画导致写入被丢弃。
+ * ================================================================== */
+static inline void lcd_wake_if_sleeping(void)
+{
+    if (s_sleeping) {
+        lcd_st7789_sleep_out();
+    }
+}
+
 void lcd_st7789_fill_screen(uint16_t color)
 {
     if (!s_initialized) return;
+    lcd_lock();
+    lcd_wake_if_sleeping();
     lcd_st7789_fill_rect(0, 0, s_cfg.width, s_cfg.height, color);
+    lcd_unlock();
 }
 
 void lcd_st7789_fill_rect(uint16_t x, uint16_t y, uint16_t w, uint16_t h,
                           uint16_t color)
 {
     if (!s_initialized) return;
+    lcd_lock();
+    lcd_wake_if_sleeping();
 
     lcd_set_window(x, y, x + w - 1, y + h - 1);
 
@@ -330,6 +400,7 @@ void lcd_st7789_fill_rect(uint16_t x, uint16_t y, uint16_t w, uint16_t h,
         ESP_ERROR_CHECK(spi_device_polling_transmit(s_spi_dev, &t));
         remaining -= n;
     }
+    lcd_unlock();
 }
 
 /* ------------------------------------------------------------------ */
@@ -338,10 +409,13 @@ void lcd_st7789_fill_rect(uint16_t x, uint16_t y, uint16_t w, uint16_t h,
 void lcd_st7789_draw_pixel(uint16_t x, uint16_t y, uint16_t color)
 {
     if (!s_initialized) return;
+    lcd_lock();
+    lcd_wake_if_sleeping();
     lcd_set_window(x, y, x, y);
     uint8_t buf[2] = { color >> 8, color & 0xFF };
     /* lcd_write_data_buf sets DC via .user=1, no manual DC needed */
     lcd_write_data_buf(buf, 2);
+    lcd_unlock();
 }
 
 /* ------------------------------------------------------------------ */
@@ -418,6 +492,8 @@ void lcd_st7789_draw_string(uint16_t x, uint16_t y, const char *str,
                             uint16_t fg_color, uint16_t bg_color)
 {
     if (!s_initialized || !str) return;
+    lcd_lock();
+    lcd_wake_if_sleeping();
 
     uint16_t cur_x = x;
     const char *p = str;
@@ -439,6 +515,7 @@ void lcd_st7789_draw_string(uint16_t x, uint16_t y, const char *str,
         }
         p += consumed;
     }
+    lcd_unlock();
 }
 
 uint16_t lcd_st7789_string_width(const char *str)

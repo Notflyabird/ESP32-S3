@@ -93,3 +93,30 @@ esp_err_t audio_input_read_pcm_chunk(int32_t *raw, int16_t *pcm, int sample_coun
     return ESP_OK;
 }
 
+/* ------------------------------------------------------------------
+ * L4 / L6-A：暂停 / 恢复 I2S0 RX 通道 DMA（不销毁 handle，安全版）
+ * ------------------------------------------------------------------ */
+esp_err_t audio_input_stop(void)
+{
+    if (s_rx_chan == NULL) return ESP_ERR_INVALID_STATE;
+    esp_err_t err = i2s_channel_disable(s_rx_chan);
+    if (err == ESP_OK) {
+        ESP_LOGI("AUDIO_IN", "I2S0 RX DMA stopped (for Light-Sleep)");
+    } else {
+        ESP_LOGW("AUDIO_IN", "I2S0 disable failed: %s", esp_err_to_name(err));
+    }
+    return err;
+}
+
+esp_err_t audio_input_resume(void)
+{
+    if (s_rx_chan == NULL) return ESP_ERR_INVALID_STATE;
+    esp_err_t err = i2s_channel_enable(s_rx_chan);
+    if (err == ESP_OK) {
+        ESP_LOGI("AUDIO_IN", "I2S0 RX DMA resumed (after Light-Sleep)");
+    } else {
+        ESP_LOGW("AUDIO_IN", "I2S0 enable failed: %s", esp_err_to_name(err));
+    }
+    return err;
+}
+

@@ -46,6 +46,41 @@ typedef struct {
 } speech_context_t;
 
 static speech_context_t s_speech;
+static volatile sr_mode_t s_mode = SR_MODE_WAKE_ONLY;  /* L4: 状态机跟踪 */
+
+/* ---------- L4 公共 API：状态查询 ---------- */
+sr_mode_t speech_get_mode(void) { return s_mode; }
+
+/* ---------- L6-A 公共 API：挂起 / 恢复 I2S（不销毁 AFE） ---------- */
+void speech_suspend_i2s(void)
+{
+    ESP_LOGI(TAG, "L6-A: suspend I2S + AFE feed (before Light-Sleep)");
+    g_sr_paused = true;           /* 先让 feed/detect 任务进入等待循环 */
+    vTaskDelay(pdMS_TO_TICKS(50)); /* 等它们退出当前 I2S read / fetch */
+    audio_input_stop();           /* 再停 I2S DMA */
+}
+
+void speech_resume_i2s(void)
+{
+    ESP_LOGI(TAG, "L6-A: resume I2S + AFE feed (after Light-Sleep)");
+    audio_input_resume();         /* 先恢复 I2S 通道 DMA */
+    /* AFE handle + MultiNet handle 都未销毁，直接恢复喂数据即可。
+     * g_sr_paused=false 后，feed_task 自动继续 i2s_read + feed。
+     * 唤醒后强制回 WAKE_ONLY 模式：用户要重新说"你好小鑫"才能进入命令会话
+     * （防止睡眠前半条命令残留在队列里）。*/
+    if (s_speech.afe_iface != NULL && s_speech.afe_data != NULL) {
+        s_speech.afe_iface->enable_wakenet(s_speech.afe_data);
+    }
+    if (s_speech.chinese.iface != NULL && s_speech.chinese.data != NULL) {
+        s_speech.chinese.iface->clean(s_speech.chinese.data);
+    }
+    /* 释放可能残留的高算力锁（睡眠前万一 command session 中断）*/
+    while (pm_profile_is_high_perf()) {
+        pm_profile_high_perf_release();
+    }
+    s_mode = SR_MODE_WAKE_ONLY;
+    g_sr_paused = false;
+}
 
 static bool configure_chinese_commands(multinet_model_t *model)
 {
@@ -236,6 +271,7 @@ static void detect_task(void *arg)
         if (result->wakeup_state == WAKENET_DETECTED) {
             ESP_LOGI(TAG, "Wake word detected! Listening for command...");
             lcd_backlight_activity();
+            s_mode = SR_MODE_FULL;            /* L4: WAKE_ONLY → FULL（命令会话期）*/
             pm_profile_high_perf_acquire();   /* L3: 语音会话期拉 240 MHz，确保 SR 流畅 */
             int s1, s2, s3, landlord;
             scorekeeper_get_scores(&s1, &s2, &s3, &landlord);
@@ -264,6 +300,7 @@ static void detect_task(void *arg)
             speech->afe_iface->enable_wakenet(speech->afe_data);
             command_session = false;
             pm_profile_high_perf_release();   /* L3: 会话结束，释放 240 MHz 锁 */
+            s_mode = SR_MODE_WAKE_ONLY;       /* L4: FULL → WAKE_ONLY（等待下一次唤醒）*/
         } else if (rejected) {
             /* 低概率被过滤：用户说了但不可靠，也算一次活动；连续多次后提示"没听清"。
              * command_session 保持 true，所以仍然需要高算力（用户可能继续说）。*/
@@ -279,6 +316,7 @@ static void detect_task(void *arg)
             speech->afe_iface->enable_wakenet(speech->afe_data);
             command_session = false;
             pm_profile_high_perf_release();   /* L3: 会话超时，释放 240 MHz 锁 */
+            s_mode = SR_MODE_WAKE_ONLY;       /* L4: FULL → WAKE_ONLY */
             int s1, s2, s3, landlord;
             scorekeeper_get_scores(&s1, &s2, &s3, &landlord);
             lcd_ui_update((uint8_t)landlord, s1, s2, s3, "就绪 你好小鑫");

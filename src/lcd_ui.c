@@ -57,14 +57,23 @@
 
 /* ======================== LCD 互斥锁 ============================== */
 /* spi_device_polling_transmit 非线程安全；undo_btn(未绑核,prio6) 与
- * sr_detect(core1,prio5) 都会画屏，需互斥。mutex 自带优先级继承。*/
+ * sr_detect(core1,prio5) 都会画屏，需互斥。mutex 自带优先级继承。
+ * ⚠️ 锁必须在 main.c 初始化阶段一次性创建，不能懒加载：
+ *    懒加载的 if(NULL) xSemaphoreCreateMutex() 不是原子的，
+ *    两个任务同时第一次调 lcd_ui_update 会创建两个锁、其中一个泄漏
+ *    → 两个任务拿到不同的锁 → 并发访问 SPI 崩溃。*/
 static SemaphoreHandle_t s_lcd_lock = NULL;
 
-static void lcd_lock(void)
+/* 内部用：初始化时（一次）创建互斥锁。调用方：lcd_ui_init_page() */
+static inline void lcd_ui_ensure_lock(void)
 {
     if (s_lcd_lock == NULL) {
         s_lcd_lock = xSemaphoreCreateMutex();
     }
+}
+
+static void lcd_lock(void)
+{
     xSemaphoreTake(s_lcd_lock, portMAX_DELAY);
 }
 
@@ -111,6 +120,9 @@ static void draw_player_row(uint16_t y, int player_no, int score, bool is_landlo
 
 void lcd_ui_init_page(void)
 {
+    /* ⚠️ 必须在第一个 lcd_lock() 之前（也就是在任何 lcd_ui_* API 被并发调之前）
+     *    把互斥锁创建好。lcd_ui_init_page 在 app_main 初始化阶段串行调用，无并发，安全。*/
+    lcd_ui_ensure_lock();
     lcd_lock();
     lcd_st7789_fill_screen(BLACK);
 
