@@ -148,6 +148,12 @@ bool lcd_backlight_init(int bl_gpio)
         return false;
     }
 
+    /* ⚠️ 深度睡眠唤醒 = 整机重启，会重新跑本函数。
+     * 若上次睡眠时用了 gpio_hold_en / gpio_deep_sleep_hold_en，唤醒后该引脚
+     * 仍被硬件锁住（低电平），导致下面 gpio_config / gpio_set_level 不生效
+     * → 背光永远点不亮。所以初始化第一步必须先解除 GPIO hold。*/
+    gpio_hold_dis((gpio_num_t)bl_gpio);
+
     /* GPIO 配置：与 lcd_st7789.c 相同配置（OUTPUT，无上拉）。
      * 在此重新配置以保证此模块可独立控制，即便顺序有差异。*/
     gpio_config_t bl_conf = {
@@ -210,6 +216,40 @@ void lcd_backlight_off(void)
         ESP_LOGD(TAG, "backlight OFF (forced)");
     }
     bl_unlock();
+}
+
+/* ---------- Light-Sleep 期间锁住背光电平 ---------- */
+void lcd_backlight_sleep_hold(void)
+{
+    if (s_bl_gpio < 0) return;
+    bl_lock();
+    hw_set(false);            /* 确保是低电平（灭）*/
+    s_bl_on = false;
+    bl_unlock();
+
+    /* 锁住 GPIO 状态：Light-Sleep 时 ESP32-S3 会复位 GPIO 为默认电平
+     * （CONFIG_ESP_SLEEP_GPIO_RESET_WORKAROUND），若不 hold，背光引脚会
+     * 被拉回默认 → 睡眠期间背光亮起。 */
+    gpio_hold_en((gpio_num_t)s_bl_gpio);
+    gpio_deep_sleep_hold_en();   /* 让 hold 在 Light/Deep-Sleep 期间都生效 */
+    ESP_LOGD(TAG, "backlight GPIO%d held LOW for sleep", s_bl_gpio);
+}
+
+void lcd_backlight_wake_release(void)
+{
+    if (s_bl_gpio < 0) return;
+    /* 先解除 hold，恢复 GPIO 正常控制 */
+    gpio_hold_dis((gpio_num_t)s_bl_gpio);
+    /* 重新配置为输出，确保可继续驱动 */
+    gpio_config_t bl_conf = {
+        .pin_bit_mask = (1ULL << s_bl_gpio),
+        .mode         = GPIO_MODE_OUTPUT,
+        .pull_up_en   = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type    = GPIO_INTR_DISABLE,
+    };
+    gpio_config(&bl_conf);
+    ESP_LOGD(TAG, "backlight GPIO%d hold released", s_bl_gpio);
 }
 
 void lcd_backlight_activity(void)

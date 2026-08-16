@@ -33,10 +33,10 @@
 #define LCD_BL_TIMEOUT_MS  20000   /* 20s 无用户活动自动关背光 */
 
 /* ====================== L6-A Light-Sleep 电源管理 ======================== */
-/* 5 分钟 = 300,000 ms 无任何活动 → 进入 Light-Sleep（省 ~50mA+）。
+/* 1 分钟 = 60,000 ms 无任何活动 → 进入 Light-Sleep（省 ~50mA+）。
  * 此期间已包含 LCD 背光关闭和 LCD 驱动 sleep_in（各自更早触发）。
  * 可按需调小/调大。*/
-#define PM_LS_TIMEOUT_MS   (5 * 60 * 1000)
+#define PM_LS_TIMEOUT_MS   (12 * 60 * 1000)
 
 /* ====================== MAX98357A I2S1 Speaker ================ */
 #define SPEAKER_I2S_PORT      I2S_NUM_1

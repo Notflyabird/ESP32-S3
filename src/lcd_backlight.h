@@ -29,6 +29,21 @@ void lcd_backlight_on(void);
 void lcd_backlight_off(void);
 
 /**
+ * @brief Light-Sleep 前调用：把背光引脚电平锁住（gpio_hold_en）。
+ *
+ * ESP32-S3 进入 Light-Sleep 时会把 GPIO 复位到默认状态（CONFIG_ESP_SLEEP_GPIO_RESET_WORKAROUND），
+ * 导致已拉低的背光引脚在睡眠期间被拉高 → 背光反而亮起（功耗没降）。
+ * 在 lcd_backlight_off() 之后调用本函数，用 GPIO hold 锁住低电平。
+ */
+void lcd_backlight_sleep_hold(void);
+
+/**
+ * @brief Light-Sleep 唤醒后调用：解除背光引脚的 GPIO hold（gpio_hold_dis）。
+ *        之后才能用 lcd_backlight_on() / lcd_backlight_activity() 正常控制。
+ */
+void lcd_backlight_wake_release(void);
+
+/**
  * @brief 用户"活动"：重置超时计时，若背光已关则重新点亮。
  *        应由按键/语音/UI 更新等用户交互事件调用。
  */

@@ -2,6 +2,7 @@
 
 #include "app_config.h"
 #include "driver/gpio.h"
+#include "driver/rtc_io.h"
 #include "esp_log.h"
 #include "esp_pm.h"
 #include "esp_sleep.h"
@@ -11,15 +12,16 @@
 #include "freertos/task.h"
 #include "lcd_backlight.h"
 #include "lcd_st7789.h"
+#include "lcd_ui.h"
 #include "pm_profile.h"
+#include "scorekeeper.h"
 #include "speech_recognition.h"
 
 static const char *TAG = "PM_LS";
 
 /* ---------- 配置 ---------- */
-#ifndef PM_LS_TIMEOUT_MS
-#define PM_LS_TIMEOUT_MS  (5 * 60 * 1000)   /* 5 分钟无活动 → Light-Sleep */
-#endif
+/* ⚠️ 休眠超时时间由 app_config.h 统一控制（PM_LS_TIMEOUT_MS），
+ * 这里不重复定义，避免两处不一致造成困惑。 */
 
 #define PM_LS_TASK_STACK   8192             /* esp_light_sleep_start 内部需要较多栈 */
 #define PM_LS_TASK_PRIO    1
@@ -44,107 +46,94 @@ static inline void ls_lock(void)   { xSemaphoreTake(s_lock, portMAX_DELAY); }
 static inline void ls_unlock(void) { xSemaphoreGive(s_lock); }
 
 /* ================================================================
- * 进入 Light-Sleep 前的准备序列
- *   顺序：SR I2S 停 → 背光关 → LCD sleep_in → 释放残留 PM 锁 → 配唤醒源
+ * 进入 Deep-Sleep 前的准备序列
+ *   顺序：SR I2S 停 → 背光关 → LCD sleep_in → 释放残留 PM 锁 → 配 EXT0 唤醒
+ * ⚠️ 深度睡眠唤醒 = 整机重启（app_main 重新跑），
+ *    esp_deep_sleep_start() 不会返回，唤醒恢复由启动流程完成。
+ *   因此这里不需要、也不会有"唤醒恢复序列"（sleep_out/背光/I2S 等）。
  * ================================================================ */
-static void do_enter_light_sleep(void)
+static void do_enter_deep_sleep(void)
 {
-    ESP_LOGI(TAG, "=== L6-A enter Light-Sleep (wake=GPIO%d) ===", (int)PM_LS_WAKE_GPIO);
+    ESP_LOGI(TAG, "=== enter Deep-Sleep (wake=GPIO%d, equivalent to reboot) ===",
+             (int)PM_LS_WAKE_GPIO);
 
-    /* (1) 停 I2S 采样 + AFE feed。
-     *     AFE / MultiNet 句柄都保留在 PSRAM / 内部 RAM 中，不销毁。*/
+    /* (1) 停 I2S 采样 + AFE feed。*/
     speech_suspend_i2s();
 
     /* (2) 关背光 LED（由 lcd_backlight_off 直接写 GPIO，不走超时任务避免竞争）*/
     lcd_backlight_off();
+    lcd_backlight_sleep_hold();
 
     /* (3) ST7789 驱动停振荡器和扫描（GRAM 内容保留，省 ~5mA）*/
     lcd_st7789_sleep_in();
 
-    /* (4) 释放所有残留的高算力锁：
-     *     万一在 command session 中途（CPU 锁 240 MHz）时系统超时进入睡眠，
-     *     必须释放，否则 Light-Sleep 退出后 DFS 无法继续工作。*/
+    /* (4) 释放所有残留的高算力锁：DFS 锁不释放会导致深度睡眠失败 */
     while (pm_profile_is_high_perf()) {
         pm_profile_high_perf_release();
     }
 
-    /* (5) 配置 GPIO 唤醒源：GPIO0 低电平唤醒（BOOT 键按下 → 拉低）。
-     *     ⚠️ 关键：Light-Sleep 必须用 esp_sleep_enable_gpio_wakeup()，
-     *        不能用 esp_sleep_enable_ext0_wakeup()——EXT0 是 Deep-Sleep 的 RTC 唤醒源，
-     *        在 Light-Sleep 中混用会导致 esp_light_sleep_start() 内部 RTC 配置异常 → 重启。
-     *     gpio_wakeup_enable: 配置 GPIO0 为低电平触发唤醒（数字域，Light-Sleep 专用）*/
+    /* (5) ⚠️ 修复"一睡就醒/主动重启"：GPIO0 既是撤销按键又做 EXT0 低电平唤醒。
+     *     深度睡眠时数字域断电，普通 gpio_pullup（数字上拉）会失效，
+     *     若按键电路无外部上拉，GPIO0 会浮空或被外部下拉成低电平 →
+     *     EXT0 低电平唤醒立即触发 → 一睡就醒 → 表现为"主动重启"。
+     *     因此必须用 RTC 域上拉（rtc_gpio_pullup_en），它在深度睡眠时仍保持。
+     *
+     *     步骤：
+     *       a) 用 RTC GPIO 上拉把 GPIO0 拉高，并读一次确认已释放（高）
+     *       b) 若仍为低 → 放弃本次睡眠（返回），等任务下次再尝试
+     *       c) 确认高后，再配置 EXT0 唤醒 */
+    /* 先把 GPIO0 切到 RTC 域并启用 RTC 上拉（深度睡眠期间保持）*/
+    rtc_gpio_deinit(PM_LS_WAKE_GPIO);
+    gpio_config_t gpio0_conf = {
+        .pin_bit_mask = (1ULL << PM_LS_WAKE_GPIO),
+        .mode         = GPIO_MODE_INPUT,
+        .pull_up_en   = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type    = GPIO_INTR_DISABLE,
+    };
+    gpio_config(&gpio0_conf);
+    vTaskDelay(pdMS_TO_TICKS(10));   /* 等上拉稳定 */
+
+    /* 用 RTC 域上拉覆盖数字上拉，确保深度睡眠期间 GPIO0 保持高电平 */
+    gpio_hold_dis(PM_LS_WAKE_GPIO);
+    rtc_gpio_pullup_en(PM_LS_WAKE_GPIO);
+    rtc_gpio_pulldown_dis(PM_LS_WAKE_GPIO);
+    vTaskDelay(pdMS_TO_TICKS(10));
+
+    if (gpio_get_level(PM_LS_WAKE_GPIO) == 0) {
+        /* 按键仍被按住 → 不进入睡眠，避免一睡即被自己唤醒 */
+        ESP_LOGW(TAG, "GPIO%d still LOW before deep-sleep — skip sleep", (int)PM_LS_WAKE_GPIO);
+        rtc_gpio_pullup_dis(PM_LS_WAKE_GPIO);   /* 解除 RTC 上拉，恢复正常 GPIO */
+        s_last_act_ms = esp_timer_get_time() / 1000;   /* 重置活动时间，稍后再试 */
+        return;
+    }
+
+    /* (6) 配置 RTC 唤醒源：GPIO0 低电平唤醒（此时已确认 GPIO0 为高） */
     esp_err_t err;
-    err = gpio_wakeup_enable(PM_LS_WAKE_GPIO, GPIO_INTR_LOW_LEVEL);
+    err = esp_sleep_enable_ext0_wakeup(PM_LS_WAKE_GPIO, 0);   /* GPIO0 低电平唤醒 */
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "gpio_wakeup_enable(GPIO%d) failed: %s",
-                 (int)PM_LS_WAKE_GPIO, esp_err_to_name(err));
-    }
-    err = esp_sleep_enable_gpio_wakeup();   /* Light-Sleep GPIO 唤醒（非 EXT0）*/
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "esp_sleep_enable_gpio_wakeup failed: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "esp_sleep_enable_ext0_wakeup failed: %s", esp_err_to_name(err));
     }
 
-    /* 标记即将进入睡眠：undo_button 的 ISR 若此时触发，会知道是唤醒边沿。*/
-    s_preparing = true;
-
-    /* 小延迟：让上面的日志 flush，同时给正在路上的 SPI/I2S 操作收尾。*/
+    /* 小延迟：让日志 flush，SPI/I2S 操作收尾 */
     vTaskDelay(pdMS_TO_TICKS(20));
 
-    /* ====== 真正进入 Light-Sleep（CPU 暂停，RAM 保留）======
-     * 唤醒原因：GPIO0 低电平 → 从这里的下一行继续执行。*/
-    err = esp_light_sleep_start();
-    if (err == ESP_OK) {
-        ESP_LOGI(TAG, "Light-Sleep exited cleanly");
-    } else {
-        ESP_LOGW(TAG, "esp_light_sleep_start returned %s (often OK if wake pending)",
-                 esp_err_to_name(err));
-    }
+    /* ====== 真正进入 Deep-Sleep（CPU/RAM 断电，唤醒后整机重启）======
+     * 此函数不返回。唤醒 → ROM 引导 → bootloader → app_main 重新初始化一切。 */
+    ESP_LOGI(TAG, "=== calling esp_deep_sleep_start() — no return ===");
+    esp_deep_sleep_start();
 
-    /* 打印唤醒原因，方便调试 */
-    esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
-    ESP_LOGI(TAG, "wakeup cause: %d (3=GPIO, 5=EXT0, 7=TIMER)", (int)cause);
-
-    /* 清除唤醒配置，避免残留影响正常运行 */
-    esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_GPIO);
-    gpio_wakeup_disable(PM_LS_WAKE_GPIO);
-
-    s_preparing = false;
-
-    /* ================================================================
-     * Light-Sleep 唤醒恢复序列（与进入相反顺序）
-     *   LCD sleep_out → 背光亮 → I2S DMA 恢复 + AFE feed 继续
-     * ================================================================ */
-    ESP_LOGI(TAG, "=== L6-A wake-up: restore peripherals ===");
-
-    /* (1) ST7789 先 sleep_out（内部等 120ms），让振荡器稳定。*/
-    lcd_st7789_sleep_out();
-
-    /* (2) 亮背光 LED */
-    lcd_backlight_on();
-
-    /* (3) 重新 enable I2S0 DMA，feed_task 会因为 g_sr_paused=false 自动继续采数据。
-     *     speech_resume_i2s 内部会：强制 WAKE_ONLY + 清 MultiNet 状态 + enable_wakenet。*/
-    speech_resume_i2s();
-
-    /* L6-A 修复：设置"唤醒宽限期"——接下来 500ms 内的 GPIO0 按键事件一律视为
-     * "EXT0 唤醒副作用"，只点亮屏幕不做事/不播语音。*/
-    {
-        int64_t now = esp_timer_get_time() / 1000;
-        s_wake_grace_until_ms = now + PM_LS_WAKE_GRACE_MS;
-        ESP_LOGI(TAG, "wake grace window: next %u ms GPIO0 = wake-only (no action)",
-                 (unsigned)PM_LS_WAKE_GRACE_MS);
-    }
-
-    ESP_LOGI(TAG, "=== L6-A wake-up complete, back to idle (WAKE_ONLY, CPU DFS) ===");
+    /* 理论上到不了这里 */
+    while (1) { vTaskDelay(pdMS_TO_TICKS(1000)); }
 }
 
 /* ================================================================
- * 后台任务：轮询活动时间戳，超时则进入 Light-Sleep
+ * 后台任务：轮询活动时间戳，超时则进入 Deep-Sleep
  * ================================================================ */
 static void pm_ls_task(void *arg)
 {
     (void)arg;
-    ESP_LOGI(TAG, "sleep manager started (timeout=%u ms, wake=GPIO%d)",
+    ESP_LOGI(TAG, "deep-sleep manager started (timeout=%u ms, wake=GPIO%d)",
              (unsigned)PM_LS_TIMEOUT_MS, (int)PM_LS_WAKE_GPIO);
 
     while (1) {
@@ -157,21 +146,13 @@ static void pm_ls_task(void *arg)
         int64_t remain  = (int64_t)PM_LS_TIMEOUT_MS - elapsed;
 
         if (remain <= 0) {
-            /* === 5 分钟到：进入 Light-Sleep === */
-            ESP_LOGI(TAG, "idle %lld ms >= %u ms -> entering Light-Sleep",
+            /* === 超时：进入 Deep-Sleep（唤醒 = 重启）=== */
+            ESP_LOGI(TAG, "idle %lld ms >= %u ms -> entering Deep-Sleep",
                      (long long)elapsed, (unsigned)PM_LS_TIMEOUT_MS);
 
-            do_enter_light_sleep();
+            do_enter_deep_sleep();   /* 不返回，唤醒后 app_main 重新跑 */
 
-            /* 睡眠结束：以"唤醒时刻"为新的活动基准，
-             * 避免立刻又被判定为"5 分钟没动"再次入睡（用户刚醒，不一定马上说话）。*/
-            int64_t wake_t = esp_timer_get_time() / 1000;
-            ls_lock();
-            s_last_act_ms = wake_t;
-            ls_unlock();
-
-            /* 唤醒后给用户 10s 的"反应缓冲"，再开始重新计时 */
-            vTaskDelay(pdMS_TO_TICKS(10000));
+            /* 理论到不了这里 */
             continue;
         }
 
