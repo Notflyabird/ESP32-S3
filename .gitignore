@@ -1,6 +1,5 @@
 build/
 managed_components/
-sdkconfig
 sdkconfig.old
 .clangd
 .vscode/.browse.c_cpp.db*
