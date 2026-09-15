@@ -27,48 +27,56 @@ Pure ESP-IDF 5.3.5 project for an ESP32-S3 N16R8 board with a single INMP441 mic
 
 ## Voice Commands
 
-Say `Hi ESP`, then use one command within six seconds.
+Say the wake word **`你好小鑫`**, then use one command within six seconds.
 
-Scoring command format:
+See [`wake-word.md`](.trae/documents/wake-word.md) for the full wake word (WakeNet) implementation notes.
+
+计分命令格式：
 
 ```text
-<player> di zhu <result> <points> fen
+<玩家> 地主 <胜负> <分数>
 ```
 
-Players:
+玩家：
 
-- `yi hao`
-- `er hao`
-- `san hao`
+- 一号
+- 二号
+- 三号
 
-Results:
+胜负：
 
-- `ying`
-- `shu`
+- 赢
+- 输
 
-Supported point phrases:
+支持的分值：
 
-- `liang fen`
-- `si fen`
-- `liu fen`
-- `ba fen`
-- `yi shi fen`
-- `yi shi er fen`
-- `yi shi si fen`
-- `yi shi liu fen`
-- `yi shi ba fen`
-- `er shi fen`
+- 两分
+- 四分
+- 六分
+- 八分
+- 十分
+- 十二分
+- 十四分
+- 十六分
+- 十八分
+- 二十分
 
-Examples:
+示例：
 
-- `yi hao di zhu ying liang fen`
-- `er hao di zhu shu ba fen`
-- `san hao di zhu ying er shi fen`
+- 一号地主赢两分
+- 二号地主输八分
+- 三号地主赢二十分
 
-Other commands:
+其他命令：
 
-- `cha xun fen shu`
-- `chong zhi suo you fen shu`
+- 查询分数
+- 重置所有分数
+- 查看计分日志
+- 清除计分日志
+
+> **说明**：ESP-SR MultiNet 的中文命令在代码里是以拼音字符串注册的
+> （见 `src/scorekeeper.c` 中的 `PLAYER_PHRASES`、`POINT_PHRASES`
+> 以及 `scorekeeper_register_commands()`），上表列出的是它们对应的中文说法。
 
 ## Scoring
 

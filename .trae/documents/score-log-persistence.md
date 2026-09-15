@@ -68,7 +68,7 @@ void score_log_view_exit(void);                    // 长按/超时退出(重绘
 
 ### 1. src/scorekeeper.c / .h（计分集成）
 - 新增命令 id：`CMD_VIEW_LOG=3`、`CMD_CLEAR_LOG=4`。
-- `scorekeeper_register_commands()` 末尾追加注册：`"cha kan ji fen ri zhi"`、`"qing chu ji fen ri zhi"`。
+- `scorekeeper_register_commands()` 末尾追加注册：`"cha kan ji fen ri zhi"`（查看计分日志）、`"qing chu ji fen ri zhi"`（清除计分日志）。
 - `undo_snapshot_commit()` 内（持 `s_score_lock`）追加：`score_log_next_round_no()` + `score_log_append_round/reset()` + `score_log_persist_scores_locked()`。
 - `scorekeeper_undo_last()` 回滚分数后追加 `score_log_persist_scores_locked()`（撤销不进日志条目，仅同步当前分数）。
 - `apply_command` 新增分支：
